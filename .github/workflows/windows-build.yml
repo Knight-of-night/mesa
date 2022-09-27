@@ -14,6 +14,7 @@ on:
 env:
   CC: gcc
   CXX: g++
+  DESTDIR: D:/a/mesa/mesa/build/install
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
@@ -36,11 +37,9 @@ jobs:
       - name: Configure
         run: |
           echo Configure...
+          mkdir build\install
           dir
-          mkdir build
-          cd > tmp
-          set /p dirname=<tmp
-          meson --prefix="%dirname%/build/install" -D gallium-drivers=swrast --buildtype=release build
+          meson -D gallium-drivers=swrast --buildtype=release build
 
       - name: Compile
         run: ninja -C build/
