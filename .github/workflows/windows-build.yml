@@ -36,10 +36,11 @@ jobs:
       - name: Configure
         run: |
           echo Configure...
+          dir
           mkdir build
           cd > tmp
-          set /p pwd=<tmp
-          meson --prefix="%pwd%/build/install" -D gallium-drivers=swrast --buildtype=release build
+          set /p dirname=<tmp
+          meson --prefix="%dirname%/build/install" -D gallium-drivers=swrast --buildtype=release build
 
       - name: Compile
         run: ninja -C build/
