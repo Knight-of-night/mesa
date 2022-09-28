@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
 
 env:
-  CC: clang #gcc
-  CXX: clang++ #g++
+  #CC: clang #gcc
+  #CXX: clang++ #g++
   DESTDIR: D:/a/mesa/mesa/build/install
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
