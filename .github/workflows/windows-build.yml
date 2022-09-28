@@ -34,16 +34,16 @@ jobs:
           choco install winflexbison pkgconfiglite
           pip install meson mako
 
-      - name: Set up VS
-        run: "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat"
-        shell: cmd
+      #- name: Set up VS
+      #  run: "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat"
+      #  shell: cmd
 
       - name: Configure
         run: |
           echo Configure...
           mkdir build\install
           dir
-          meson -D gallium-drivers=swrast --buildtype=release build
+          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && meson -D gallium-drivers=swrast --buildtype=release build
         shell: cmd
 
       - name: Compile
