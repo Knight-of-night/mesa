@@ -1,0 +1,103 @@
+# Build for Windows
+
+name: Windows-LLVMpipe-msvc
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  #push:
+  #  branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+env:
+  CC: cl #clang #gcc
+  CXX: cl #clang++ #g++
+  DESTDIR: D:/a/mesa/mesa/build/install
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: windows-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          echo Install dependencies...
+          choco install winflexbison pkgconfiglite
+          pip install meson mako
+
+      - name: Clone llvm
+        run: git clone --depth 1 https://github.com/llvm/llvm-project.git
+
+      - name: Configure and build LLVM
+        run: |
+          mkdir subprojects/llvm
+          cd llvm-project
+          mkdir build
+          cd build
+          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && cmake -G Ninja -DCMAKE_INSTALL_PREFIX=D:/a/mesa/mesa/subprojects/llvm -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
+          ninja
+          ninja install
+
+      - name: Configure
+        run: |
+          echo Configure...
+          echo project('llvm', ['cpp']) > subprojects/llvm/meson.build
+          echo cpp = meson.get_compiler('cpp') >> subprojects/llvm/meson.build
+          echo _deps = []
+          echo _search = join_paths(meson.current_source_dir(), 'lib') >> subprojects/llvm/meson.build
+          echo foreach d : ['libLLVMCodeGen', 'libLLVMScalarOpts', 'libLLVMAnalysis', >> subprojects/llvm/meson.build
+          echo              'libLLVMTransformUtils', 'libLLVMCore', 'libLLVMX86CodeGen', >> subprojects/llvm/meson.build
+          echo              'libLLVMSelectionDAG', 'libLLVMipo', 'libLLVMAsmPrinter', >> subprojects/llvm/meson.build
+          echo              'libLLVMInstCombine', 'libLLVMInstrumentation', 'libLLVMMC', >> subprojects/llvm/meson.build
+          echo              'libLLVMGlobalISel', 'libLLVMObjectYAML', 'libLLVMDebugInfoPDB', >> subprojects/llvm/meson.build
+          echo              'libLLVMVectorize', 'libLLVMPasses', 'libLLVMSupport', >> subprojects/llvm/meson.build
+          echo              'libLLVMLTO', 'libLLVMObject', 'libLLVMDebugInfoCodeView', >> subprojects/llvm/meson.build
+          echo              'libLLVMDebugInfoDWARF', 'libLLVMOrcJIT', 'libLLVMProfileData', >> subprojects/llvm/meson.build
+          echo              'libLLVMObjCARCOpts', 'libLLVMBitReader', 'libLLVMCoroutines', >> subprojects/llvm/meson.build
+          echo              'libLLVMBitWriter', 'libLLVMRuntimeDyld', 'libLLVMMIRParser', >> subprojects/llvm/meson.build
+          echo              'libLLVMX86Desc', 'libLLVMAsmParser', 'libLLVMTableGen', >> subprojects/llvm/meson.build
+          echo              'libLLVMFuzzMutate', 'libLLVMLinker', 'libLLVMMCParser', >> subprojects/llvm/meson.build
+          echo              'libLLVMExecutionEngine', 'libLLVMCoverage', 'libLLVMInterpreter', >> subprojects/llvm/meson.build
+          echo              'libLLVMTarget', 'libLLVMX86AsmParser', 'libLLVMSymbolize', >> subprojects/llvm/meson.build
+          echo              'libLLVMDebugInfoMSF', 'libLLVMMCJIT', 'libLLVMXRay', >> subprojects/llvm/meson.build
+          echo              'libLLVMX86AsmPrinter', 'libLLVMX86Disassembler', >> subprojects/llvm/meson.build
+          echo              'libLLVMMCDisassembler', 'libLLVMOption', 'libLLVMIRReader', >> subprojects/llvm/meson.build
+          echo              'libLLVMLibDriver', 'libLLVMDlltoolDriver', 'libLLVMDemangle', >> subprojects/llvm/meson.build
+          echo              'libLLVMBinaryFormat', 'libLLVMLineEditor', >> subprojects/llvm/meson.build
+          echo              'libLLVMWindowsManifest', 'libLLVMX86Info', 'libLLVMX86Utils'] >> subprojects/llvm/meson.build
+          echo   _deps += cpp.find_library(d, dirs : _search) >> subprojects/llvm/meson.build
+          echo endforeach >> subprojects/llvm/meson.build
+          echo dep_llvm = declare_dependency( >> subprojects/llvm/meson.build
+          echo   include_directories : include_directories('include'), >> subprojects/llvm/meson.build
+          echo   dependencies : _deps, >> subprojects/llvm/meson.build
+          echo   version : '15.0.1', >> subprojects/llvm/meson.build
+          echo ) >> subprojects/llvm/meson.build
+          echo has_rtti = false >> subprojects/llvm/meson.build
+          echo irbuilder_h = files('include/llvm/IR/IRBuilder.h') >> subprojects/llvm/meson.build
+          mkdir build\install
+          dir
+          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && meson -D gallium-drivers=swrast --buildtype=release build
+        shell: cmd
+
+      - name: Compile
+        run: |
+          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && ninja -C build/
+        shell: cmd
+
+      - name: Install
+        run: ninja -C build/ install
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v3.0.0
+        with:
+          name: builds
+          path: build/install
