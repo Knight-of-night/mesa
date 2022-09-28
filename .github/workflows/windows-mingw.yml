@@ -42,7 +42,7 @@ jobs:
           echo Configure...
           mkdir build\install
           dir
-          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && meson -D gallium-drivers=swrast --includedir "C:\Program Files (x86)/Windows Kits/10/Include/10.0.22621.0" --buildtype=release build
+          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && meson -D gallium-drivers=swrast --includedir "C:\Program Files (x86)/Windows Kits/10/Include/10.0.22621.0/ucrt" --buildtype=release build
         shell: cmd
 
       - name: Compile
