@@ -12,16 +12,16 @@ on:
   workflow_dispatch:
 
 env:
-  CC: gcc
-  CXX: g++
-  DESTDIR: D:/a/mesa/mesa/build/install
+  CC: x86_64-w64-mingw32-gcc
+  CXX: x86_64-w64-mingw32-g++
+  #DESTDIR: D:/a/mesa/mesa/build/install
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   # This workflow contains a single job called "build"
   build:
     # The type of runner that the job will run on
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -31,30 +31,24 @@ jobs:
       - name: Install dependencies
         run: |
           echo Install dependencies...
-          choco install winflexbison pkgconfiglite
-          pip install meson mako
-      #- name: Set up VS
-      #  run: "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat"
-      #  shell: cmd
+          sudo apt-get update
+          sudo apt-get install mingw-w64 meson -y
 
       - name: Configure
         run: |
           echo Configure...
-          mkdir build\install
-          dir
-          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && meson -D gallium-drivers=swrast --includedir "C:\Program Files (x86)/Windows Kits/10/Include/10.0.22621.0/ucrt" --buildtype=release build
-        shell: cmd
+          pwd
+          mkdir -p build\install
+          meson -D platforms=windows -D gallium-drivers=swrast --buildtype=release build
 
       - name: Compile
-        run: |
-          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && ninja -C build/
-        shell: cmd
+        run: ninja -C build/
 
       - name: Install
         run: ninja -C build/ install
 
-      - name: Upload a Build Artifact
-        uses: actions/upload-artifact@v3.0.0
-        with:
-          name: builds
-          path: build/install
+      #- name: Upload a Build Artifact
+      #  uses: actions/upload-artifact@v3.0.0
+      #  with:
+      #    name: builds
+      #    path: build/install
