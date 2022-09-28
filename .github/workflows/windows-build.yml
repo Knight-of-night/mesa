@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
 
 env:
-  CC: cl #clang #gcc
-  CXX: cl #clang++ #g++
+  #CC: cl #clang #gcc
+  #CXX: cl #clang++ #g++
   DESTDIR: D:/a/mesa/mesa/build/install
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
@@ -37,6 +37,7 @@ jobs:
       - name: Configure
         run: |
           echo Configure...
+          C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64
           mkdir build\install
           dir
           meson -D gallium-drivers=swrast --buildtype=release build
