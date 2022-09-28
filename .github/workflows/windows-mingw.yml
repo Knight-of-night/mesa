@@ -14,7 +14,7 @@ on:
 env:
   CC: x86_64-w64-mingw32-gcc
   CXX: x86_64-w64-mingw32-g++
-  #DESTDIR: D:/a/mesa/mesa/build/install
+  DESTDIR: /home/runner/work/mesa/mesa/build/install
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
@@ -39,7 +39,7 @@ jobs:
           echo Configure...
           pwd
           mkdir -p build\install
-          meson -D platforms=windows -D gallium-drivers=swrast --buildtype=release build
+          meson -D gallium-drivers=swrast --buildtype=release build
 
       - name: Compile
         run: ninja -C build/
@@ -47,8 +47,8 @@ jobs:
       - name: Install
         run: ninja -C build/ install
 
-      #- name: Upload a Build Artifact
-      #  uses: actions/upload-artifact@v3.0.0
-      #  with:
-      #    name: builds
-      #    path: build/install
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v3.0.0
+        with:
+          name: builds
+          path: build/install
