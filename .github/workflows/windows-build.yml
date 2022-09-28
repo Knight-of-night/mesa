@@ -37,10 +37,11 @@ jobs:
       - name: Configure
         run: |
           echo Configure...
-          C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64
+          "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           mkdir build\install
           dir
           meson -D gallium-drivers=swrast --buildtype=release build
+        shell: cmd
 
       - name: Compile
         run: ninja -C build/
