@@ -39,7 +39,7 @@ jobs:
 
       - name: Configure and build LLVM
         run: |
-          mkdir subprojects/llvm
+          mkdir subprojects\llvm
           cd llvm-project
           mkdir build
           cd build
@@ -62,7 +62,7 @@ jobs:
           echo Configure...
           echo project('llvm', ['cpp']) > subprojects/llvm/meson.build
           echo cpp = meson.get_compiler('cpp') >> subprojects/llvm/meson.build
-          echo _deps = []
+          echo _deps = [] >> subprojects/llvm/meson.build
           echo _search = join_paths(meson.current_source_dir(), 'lib') >> subprojects/llvm/meson.build
           echo foreach d : ['libLLVMCodeGen', 'libLLVMScalarOpts', 'libLLVMAnalysis', >> subprojects/llvm/meson.build
           echo              'libLLVMTransformUtils', 'libLLVMCore', 'libLLVMX86CodeGen', >> subprojects/llvm/meson.build
