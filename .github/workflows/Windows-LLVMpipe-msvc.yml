@@ -46,6 +46,7 @@ jobs:
           cmake -G Ninja -DCMAKE_INSTALL_PREFIX=D:/a/mesa/mesa/subprojects/llvm -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
           ninja
           ninja install
+        shell: cmd
 
       - name: Configure
         run: |
