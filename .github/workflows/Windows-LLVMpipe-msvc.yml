@@ -39,11 +39,11 @@ jobs:
 
       - name: Configure and build LLVM
         run: |
-          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && mkdir subprojects/llvm
+          mkdir subprojects/llvm
           cd llvm-project
           mkdir build
           cd build
-          cmake -G Ninja -DCMAKE_INSTALL_PREFIX=D:/a/mesa/mesa/subprojects/llvm -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
+          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && cmake -G Ninja -DCMAKE_INSTALL_PREFIX=D:/a/mesa/mesa/subprojects/llvm -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
           ninja
           ninja install
         shell: cmd
