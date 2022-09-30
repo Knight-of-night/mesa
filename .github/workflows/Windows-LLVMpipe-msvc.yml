@@ -43,7 +43,7 @@ jobs:
           cd llvm-project
           mkdir build
           cd build
-          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && cmake -G Ninja -DCMAKE_INSTALL_PREFIX=D:/a/mesa/mesa/subprojects/llvm -DLLVM_ENABLE_PROJECTS=all -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
+          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && cmake -G Ninja -DCMAKE_INSTALL_PREFIX=D:/a/mesa/mesa/subprojects/llvm -DLLVM_ENABLE_PROJECTS="bolt;clang;clang-tools-extra;compiler-rt;libc;libclc;lld;lldb;mlir;openmp;polly;pstl" -DLLVM_ENABLE_RUNTIMES="libcxx;libcxxabi;libunwind" -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
         shell: cmd
 
       - name: Build LLVM
