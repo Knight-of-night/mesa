@@ -38,8 +38,8 @@ jobs:
         run: |
           echo Configure...
           pwd
-          mkdir -p build\install
-          meson -D gallium-drivers=swrast --buildtype=release build
+          mkdir -p build/install
+          meson --cross-file x86_64-w64-mingw32.txt -D gallium-drivers=swrast --buildtype=release build
 
       - name: Compile
         run: ninja -C build/
