@@ -37,7 +37,7 @@ jobs:
           sudo pip install meson mako
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh all
+          sudo ./llvm.sh 14 all
       - name: Configure
         run: |
           echo Configure...
