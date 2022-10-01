@@ -32,7 +32,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/home/runner/work/mesa/mesa/install -DLLVM_ENABLE_PROJECTS=all -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
+          cmake -G Ninja -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_INSTALL_PREFIX=/home/runner/work/mesa/mesa/install -DLLVM_ENABLE_PROJECTS=all -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
 
       - name: Build
         run: |
