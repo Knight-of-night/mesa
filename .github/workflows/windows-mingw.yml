@@ -32,7 +32,8 @@ jobs:
         run: |
           echo Install dependencies...
           sudo apt-get update
-          sudo apt-get install mingw-w64 meson wine64 wine -y
+          sudo apt-get install mingw-w64 wine64 wine -y
+          sudo pip install meson
 
       - name: Configure
         run: |
