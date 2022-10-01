@@ -1,0 +1,54 @@
+# Build for Windows
+
+name: Windows-LLVMpipe-MinGW
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  #push:
+  #  branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+env:
+  CC: x86_64-w64-mingw32-gcc
+  CXX: x86_64-w64-mingw32-g++
+  WINDRES: x86_64-w64-mingw32-windres
+  DESTDIR: /home/runner/work/mesa/mesa/build/install
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          echo Install dependencies...
+          sudo apt-get update
+          sudo apt-get install mingw-w64 wine64 wine binutils-mingw-w64-x86-64 ninja-build llvm-dev -y
+          sudo pip install meson mako
+      - name: Configure
+        run: |
+          echo Configure...
+          pwd
+          mkdir -p build/install
+          meson --cross-file x86_64-w64-mingw32.txt -D gallium-drivers=swrast --buildtype=release build
+      - name: Compile
+        run: ninja -C build/
+
+      - name: Install
+        run: ninja -C build/ install
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v3.0.0
+        with:
+          name: builds
+          path: build/install
