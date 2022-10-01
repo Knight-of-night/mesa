@@ -33,8 +33,11 @@ jobs:
         run: |
           echo Install dependencies...
           sudo apt-get update
-          sudo apt-get install mingw-w64 wine64 wine binutils-mingw-w64-x86-64 ninja-build llvm-dev -y
+          sudo apt-get install mingw-w64 wine64 wine binutils-mingw-w64-x86-64 ninja-build wget -y
           sudo pip install meson mako
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh all
       - name: Configure
         run: |
           echo Configure...
