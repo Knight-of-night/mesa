@@ -14,6 +14,7 @@ on:
 env:
   CC: x86_64-w64-mingw32-gcc
   CXX: x86_64-w64-mingw32-g++
+  WINDRES: x86_64-w64-mingw32-windres
   DESTDIR: /home/runner/work/mesa/mesa/build/install
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
