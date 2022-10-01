@@ -33,7 +33,7 @@ jobs:
           mkdir build
           cd build
           cmake --version
-          cmake -G Ninja -DCMAKE_SYSTEM_NAME=Windows -DLLVM_TARGET_ARCH=X86 -DCMAKE_SYSTEM_PROCESSOR=x86_64 -DCMAKE_INSTALL_PREFIX=/home/runner/work/mesa/mesa/install -DLLDB_PYTHON_RELATIVE_PATH=python -DLLVM_ENABLE_PROJECTS=all -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
+          cmake -G Ninja -DCMAKE_SYSTEM_NAME=Windows -DLLVM_TARGET_ARCH=X86 -DCMAKE_SYSTEM_PROCESSOR=x86_64 -DCMAKE_INSTALL_PREFIX=/home/runner/work/mesa/mesa/install -DLLDB_ENABLE_PYTHON=false -DLLVM_ENABLE_PROJECTS=all -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
 
       - name: Build
         run: |
