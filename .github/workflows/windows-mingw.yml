@@ -32,7 +32,7 @@ jobs:
         run: |
           echo Install dependencies...
           sudo apt-get update
-          sudo apt-get install mingw-w64 wine64 wine -y
+          sudo apt-get install mingw-w64 wine64 wine binutils-mingw-w64-x86-64 -y
           sudo pip install meson mako
 
       - name: Configure
