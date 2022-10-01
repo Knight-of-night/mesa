@@ -33,18 +33,18 @@ jobs:
         run: |
           echo Install dependencies...
           sudo apt-get update
-          sudo apt-get install mingw-w64 wine64 wine binutils-mingw-w64-x86-64 ninja-build wget -y
+          sudo apt-get install mingw-w64 wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix ninja-build wget -y
           sudo pip install meson mako
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 14 all
+          sudo ./llvm.sh 15 all
       - name: Configure
         run: |
           echo Configure...
           ls -l /usr/lib/ | grep llvm
           pwd
           mkdir -p build/install
-          meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D cpp_std=c++14 -D gallium-drivers=swrast --buildtype=release build
+          meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D cpp_std=c++17 -D gallium-drivers=swrast --buildtype=release build
       - name: Compile
         run: ninja -C build/
 
