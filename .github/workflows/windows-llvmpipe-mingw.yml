@@ -44,7 +44,7 @@ jobs:
           ls -l /usr/lib/ | grep llvm
           pwd
           mkdir -p build/install
-          meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D cpp_std=c++17 -D gallium-drivers=swrast --buildtype=release build
+          meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D cpp_std=c++11 -D gallium-drivers=swrast --buildtype=release build
       - name: Compile
         run: ninja -C build/
 
