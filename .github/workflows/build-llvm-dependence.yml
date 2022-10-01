@@ -4,6 +4,11 @@ name: Build-LLVM-Dependence
 on:
   workflow_dispatch:
 
+env:
+  CC: x86_64-w64-mingw32-gcc
+  CXX: x86_64-w64-mingw32-g++
+  WINDRES: x86_64-w64-mingw32-windres
+
 jobs:
   # This workflow contains a single job called "build"
   build:
@@ -27,7 +32,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/home/runner/work/mesa/llvm-project/install -DLLVM_ENABLE_PROJECTS=all -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
+          cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/home/runner/work/mesa/mesa/install -DLLVM_ENABLE_PROJECTS=all -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
 
       - name: Build
         run: |
