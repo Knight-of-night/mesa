@@ -34,6 +34,7 @@ jobs:
           echo Install dependencies...
           sudo apt-get update
           sudo apt-get install wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build -y
+          sudo apt-get build-dep mesa
           sudo apt-get remove gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32
           sudo pip install meson mako
           wget https://apt.llvm.org/llvm.sh
@@ -42,7 +43,6 @@ jobs:
       - name: Configure
         run: |
           echo Configure...
-          PATH=$PATH:/usr/lib:/usr/lib/x86_64-linux-gnu
           echo $PATH
           pwd
           mkdir -p build/install
