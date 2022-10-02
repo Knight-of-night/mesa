@@ -66,6 +66,13 @@ jobs:
           find /usr/lib/x86_64-linux-gnu/ -name "libz.a" -exec sudo cp -pd {} /usr/lib/ \;
           find /usr/lib/x86_64-linux-gnu/ -name "libtinfo.a" -exec sudo cp -pd {} /usr/lib/ \;
           find /usr/lib/x86_64-linux-gnu/ -name "libxml2.a" -exec sudo cp -pd {} /usr/lib/ \;
+          find /usr/lib/x86_64-linux-gnu/ -name "librt.so" -exec sudo cp -pd {} /usr/lib/ \;
+          find /usr/lib/x86_64-linux-gnu/ -name "libdl.so" -exec sudo cp -pd {} /usr/lib/ \;
+          find /usr/lib/x86_64-linux-gnu/ -name "libz.so" -exec sudo cp -pd {} /usr/lib/ \;
+          find /usr/lib/x86_64-linux-gnu/ -name "libtinfo.so" -exec sudo cp -pd {} /usr/lib/ \;
+          find /usr/lib/x86_64-linux-gnu/ -name "libxml2.so" -exec sudo cp -pd {} /usr/lib/ \;
+          echo $LD_LIBRARY_PATH
+          echo $LIBRARY_PATH
 
       - name: Configure
         #LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
