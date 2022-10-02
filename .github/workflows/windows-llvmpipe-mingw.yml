@@ -32,7 +32,10 @@ jobs:
       - name: Install dependencies
         run: |
           echo Install dependencies...
+          cat /etc/apt/sources.list
+          ls -l /etc/apt/sources.list.d/
           sudo add-apt-repository "deb-src http://archive.ubuntu.com/ubuntu jammy universe multiverse"
+          cat /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build -y
           sudo apt-get build-dep mesa
