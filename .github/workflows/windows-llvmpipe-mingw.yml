@@ -29,13 +29,20 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v3
 
+      - name: Add deb repository
+        # You may pin to the exact commit or the version.
+        # uses: myci-actions/add-deb-repo@5275891305537d029f5f3fa7ed48d367ec0caf27
+        uses: myci-actions/add-deb-repo@10
+        with:
+          # repository line as it appears in the sources.list
+          repo: deb-src http://azure.archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+          # name of the repository, the name will be used for a new file in the /etc/apt/sources.list.d directory, the .list suffix will be added to the name
+          repo-name: ubuntu-deb-src-repo
+
       - name: Install dependencies
+        #sudo add-apt-repository "deb-src http://archive.ubuntu.com/ubuntu jammy universe multiverse"
         run: |
           echo Install dependencies...
-          cat /etc/apt/sources.list
-          ls -l /etc/apt/sources.list.d/
-          sudo add-apt-repository "deb-src http://archive.ubuntu.com/ubuntu jammy universe multiverse"
-          cat /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build -y
           sudo apt-get build-dep mesa
