@@ -72,6 +72,7 @@ jobs:
           echo "Copying to /usr/lib/"
           sudo ln -s /usr/lib/llvm-15 /usr/x86_64-w64-mingw32/lib/llvm-15
           sudo ln -s /usr/include/llvm-15 /usr/x86_64-w64-mingw32/include/llvm-15
+          find /usr/lib/x86_64-linux-gnu/ -name "libLLVM-15.so" -exec sudo cp -pd {} /usr/x86_64-w64-mingw32/lib/ \;
           find /usr/lib/x86_64-linux-gnu/ -name "librt.a" -exec sudo cp -pd {} /usr/x86_64-w64-mingw32/lib/ \;
           find /usr/lib/x86_64-linux-gnu/ -name "libdl.a" -exec sudo cp -pd {} /usr/x86_64-w64-mingw32/lib/ \;
           find /usr/lib/x86_64-linux-gnu/ -name "libz.a" -exec sudo cp -pd {} /usr/x86_64-w64-mingw32/lib/ \;
