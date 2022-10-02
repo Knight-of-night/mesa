@@ -16,6 +16,8 @@ env:
   CXX: x86_64-w64-mingw32-g++-posix
   WINDRES: x86_64-w64-mingw32-windres
   DESTDIR: /home/runner/work/mesa/mesa/build/install
+  LD_LIBRARY_PATH: /usr/lib
+  LIBRARY_PATH: /usr/lib
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
