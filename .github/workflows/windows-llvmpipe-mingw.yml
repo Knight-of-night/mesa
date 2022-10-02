@@ -12,8 +12,8 @@ on:
   workflow_dispatch:
 
 env:
-  CC: x86_64-w64-mingw32-gcc
-  CXX: x86_64-w64-mingw32-g++
+  CC: x86_64-w64-mingw32-gcc-posix
+  CXX: x86_64-w64-mingw32-g++-posix
   WINDRES: x86_64-w64-mingw32-windres
   DESTDIR: /home/runner/work/mesa/mesa/build/install
 
