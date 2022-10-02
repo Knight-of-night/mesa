@@ -29,15 +29,15 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v3
 
-      - name: Add deb repository
-        # You may pin to the exact commit or the version.
-        # uses: myci-actions/add-deb-repo@5275891305537d029f5f3fa7ed48d367ec0caf27
-        uses: myci-actions/add-deb-repo@10
-        with:
-          # repository line as it appears in the sources.list
-          repo: deb-src http://azure.archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
-          # name of the repository, the name will be used for a new file in the /etc/apt/sources.list.d directory, the .list suffix will be added to the name
-          repo-name: ubuntu-deb-src-repo
+#       - name: Add deb repository
+#         # You may pin to the exact commit or the version.
+#         # uses: myci-actions/add-deb-repo@5275891305537d029f5f3fa7ed48d367ec0caf27
+#         uses: myci-actions/add-deb-repo@10
+#         with:
+#           # repository line as it appears in the sources.list
+#           repo: deb-src http://azure.archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+#           # name of the repository, the name will be used for a new file in the /etc/apt/sources.list.d directory, the .list suffix will be added to the name
+#           repo-name: ubuntu-deb-src-repo
 
       - name: Install dependencies
         #sudo add-apt-repository "deb-src http://archive.ubuntu.com/ubuntu jammy universe multiverse"
@@ -55,11 +55,16 @@ jobs:
         run: |
           echo Configure...
           echo $PATH
+          LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
+          LIBRARY_PATH=$LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
           pwd
           mkdir -p build/install
           meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D c_std=c17 -D cpp_std=c++17 -D gallium-drivers=swrast --buildtype=release build
       - name: Compile
-        run: ninja -C build/
+        run: |
+          LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
+          LIBRARY_PATH=$LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
+          ninja -C build/
 
       - name: Install
         run: ninja -C build/ install
