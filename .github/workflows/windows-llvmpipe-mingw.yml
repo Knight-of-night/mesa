@@ -51,12 +51,28 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 15 all
+
+      - name: Show libs
+        run: ls -l /usr/lib/
+
+      - name: Show x86_64-linux-gnu libs
+        run: ls -l /usr/lib/x86_64-linux-gnu/
+
+      - name: Set libs
+        run: |
+          echo "Copying to /usr/lib/"
+          find /usr/lib/x86_64-linux-gnu/ -name "librt.a" -exec cp -pd {} /usr/lib/\;
+          find /usr/lib/x86_64-linux-gnu/ -name "libdl.a" -exec cp -pd {} /usr/lib/\;
+          find /usr/lib/x86_64-linux-gnu/ -name "libz.a" -exec cp -pd {} /usr/lib/\;
+          find /usr/lib/x86_64-linux-gnu/ -name "libtinfo.a" -exec cp -pd {} /usr/lib/\;
+          find /usr/lib/x86_64-linux-gnu/ -name "libxml2.a" -exec cp -pd {} /usr/lib/\;
+
       - name: Configure
+        #LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
+        #LIBRARY_PATH=$LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
         run: |
           echo Configure...
           echo $PATH
-          LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
-          LIBRARY_PATH=$LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
           pwd
           mkdir -p build/install
           meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D c_std=c17 -D cpp_std=c++17 -D gallium-drivers=swrast --buildtype=release build
