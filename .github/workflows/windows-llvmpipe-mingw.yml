@@ -127,7 +127,7 @@ jobs:
 #           path: build/build.ninja
 
       - name: Use custom build.ninja
-        run: cp -f my_scripts/build3.ninja build/build.ninja
+        run: cp -f my_scripts/build4.ninja build/build.ninja
 
       - name: Compile
         run: |
