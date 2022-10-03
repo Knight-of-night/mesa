@@ -120,11 +120,11 @@ jobs:
           mkdir -p build/install
           meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D c_std=c17 -D cpp_std=c++17 -Dshared-llvm=true -D gallium-drivers=swrast --buildtype=release build
 
-      - name: Upload build.ninja
-        uses: actions/upload-artifact@v3.0.0
-        with:
-          name: build-ninja
-          path: build/build.ninja
+#       - name: Upload build.ninja
+#         uses: actions/upload-artifact@v3.0.0
+#         with:
+#           name: build-ninja
+#           path: build/build.ninja
 
       - name: Use custom build.ninja
         run: cp -f my_scripts/build3.ninja build/build.ninja
