@@ -5,15 +5,15 @@ on:
   workflow_dispatch:
 
 env:
-  CC: x86_64-w64-mingw32-gcc
-  CXX: x86_64-w64-mingw32-g++
+  CC: x86_64-w64-mingw32-gcc-posix
+  CXX: x86_64-w64-mingw32-g++-posix
   WINDRES: x86_64-w64-mingw32-windres
 
 jobs:
   # This workflow contains a single job called "build"
   build:
     # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -26,14 +26,14 @@ jobs:
         run: |
           echo Install dependencies...
           sudo apt-get update
-          sudo apt-get install mingw-w64 wine64 wine binutils-mingw-w64-x86-64 ninja-build -y
+          sudo apt-get install gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 wine64 wine binutils-mingw-w64-x86-64 ninja-build -y
 
       - name: Configure
         run: |
           mkdir build
           cd build
           cmake --version
-          cmake -G Ninja -DCMAKE_SYSTEM_NAME=Windows -DLLVM_TARGET_ARCH=X86 -DCMAKE_SYSTEM_PROCESSOR=x86_64 -DCMAKE_INSTALL_PREFIX=/home/runner/work/mesa/mesa/install -DLLDB_ENABLE_PYTHON=false -DLLVM_ENABLE_PROJECTS=all -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
+          cmake -G Ninja -DCMAKE_SYSTEM_NAME=Windows -DLLVM_TARGET_ARCH=X86 -DCMAKE_SYSTEM_PROCESSOR=x86_64 -DCMAKE_INSTALL_PREFIX=/home/runner/work/mesa/mesa/install -DLLDB_ENABLE_PYTHON=false -DLLVM_ENABLE_PROJECTS="clang;libclc" -DCMAKE_BUILD_TYPE=Release -DLLVM_USE_CRT_RELEASE=MT ../llvm
 
       - name: Build
         run: |
