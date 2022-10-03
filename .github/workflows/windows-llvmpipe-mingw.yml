@@ -83,6 +83,7 @@ jobs:
           find /usr/lib/x86_64-linux-gnu/ -name "libxml2.a" -exec sudo cp -pd {} /usr/x86_64-w64-mingw32/lib/ \;
           
           find /usr/lib/llvm-15/lib -name "*.a" -exec sudo cp -pd {} /usr/x86_64-w64-mingw32/lib/ \;
+          find /usr/lib/llvm-15/lib -name "*.so" -exec sudo cp -pd {} /usr/x86_64-w64-mingw32/lib/ \;
           
 #          sudo cp -rpd /usr/lib/llvm-15/lib /usr/x86_64-w64-mingw32/lib
           
@@ -114,7 +115,7 @@ jobs:
           echo $PATH
           pwd
           mkdir -p build/install
-          meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D c_std=c17 -D cpp_std=c++17 -D gallium-drivers=swrast --buildtype=release build
+          meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D c_std=c17 -D cpp_std=c++17 -Dshared-llvm=true -D gallium-drivers=swrast --buildtype=release build
 
 #       - name: Upload build.ninja
 #         uses: actions/upload-artifact@v3.0.0
@@ -122,8 +123,8 @@ jobs:
 #           name: build-ninja
 #           path: build/build.ninja
 
-      - name: Use custom build.ninja
-        run: cp -f my_scripts/build2.ninja build/build.ninja
+#       - name: Use custom build.ninja
+#         run: cp -f my_scripts/build2.ninja build/build.ninja
 
       - name: Compile
         run: |
