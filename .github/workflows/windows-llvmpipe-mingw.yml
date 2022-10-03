@@ -48,7 +48,6 @@ jobs:
           echo Install dependencies...
           sudo apt-get update
           sudo apt-get install wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build -y
-          sudo apt-get remove gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32
           sudo pip install meson mako
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -105,7 +104,14 @@ jobs:
           echo $PATH
           pwd
           mkdir -p build/install
-          meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D c_std=c17 -D cpp_std=c++17 -D gallium-drivers=swrast -Dshared-llvm=true --buildtype=release build
+          meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D c_std=c17 -D cpp_std=c++17 -D gallium-drivers=swrast --buildtype=release build
+
+      - name: Upload build.ninja
+        uses: actions/upload-artifact@v3.0.0
+        with:
+          name: build-ninja
+          path: build/build.ninja
+
       - name: Compile
         run: |
           LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/lib:/lib/x86_64-linux-gnu:/usr/lib:/usr/lib/x86_64-linux-gnu
