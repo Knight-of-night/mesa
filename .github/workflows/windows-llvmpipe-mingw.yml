@@ -66,8 +66,11 @@ jobs:
 #       - name: Show x86_64-linux-gnu libs
 #         run: ls -l /usr/lib/x86_64-linux-gnu/
 
-      - name: Search llvm
-        run: ls -l /usr/lib/x86_64-linux-gnu/ | grep libLLVM
+#       - name: Search llvm
+#         run: ls -l /usr/lib/x86_64-linux-gnu/ | grep libLLVM
+
+      - name: Show llvm libs
+        run: ls -l /usr/lib/llvm-15/lib
 
       - name: Set libs
         run: |
@@ -106,11 +109,14 @@ jobs:
           mkdir -p build/install
           meson --cross-file x86_64-w64-mingw32-cross-llvm.txt -D c_std=c17 -D cpp_std=c++17 -D gallium-drivers=swrast --buildtype=release build
 
-      - name: Upload build.ninja
-        uses: actions/upload-artifact@v3.0.0
-        with:
-          name: build-ninja
-          path: build/build.ninja
+#       - name: Upload build.ninja
+#         uses: actions/upload-artifact@v3.0.0
+#         with:
+#           name: build-ninja
+#           path: build/build.ninja
+
+      - name: Use custom build.ninja
+        run: cp -f my_scripts/build.ninja build/build.ninja
 
       - name: Compile
         run: |
