@@ -82,10 +82,8 @@ jobs:
           set path=D:\a\mesa\mesa\llvm\bin;%path%
           mkdir build\install
           dir
-          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && meson -D gallium-drivers=swrast --buildtype=release build
+          "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && meson -D gallium-drivers=swrast -D cpp_link_args=/MT --buildtype=release build
         shell: cmd
-        env:
-          LDFLAGS: /MT
 
       - name: Compile
         run: |
