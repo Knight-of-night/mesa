@@ -1,0 +1,64 @@
+# Build for Windows
+
+name: Windows-LLVMpipe-MinGW2
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  #push:
+  #  branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+env:
+  CC: x86_64-w64-mingw32-gcc-posix
+  CXX: x86_64-w64-mingw32-g++-posix
+  WINDRES: x86_64-w64-mingw32-windres
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-22.04
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          echo Install dependencies...
+          sudo apt-get update
+          sudo apt-get install wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build ccache -y
+          sudo pip install meson mako
+
+      - name: x86_build-mingw-patch
+        run: sudo bash .gitlab-ci/container/debian/x86_build-mingw-patch.sh
+
+      - name: x86_build-mingw-source-deps
+        run: sudo bash .gitlab-ci/container/debian/x86_build-mingw-source-deps.sh
+
+      - name: Configure
+        run: |
+          echo Configure...
+          mkdir -p build/install
+          meson -D gallium-drivers="swrast,d3d12,zink" -D vulkan_drivers="swrast,amd,microsoft-experimental" -D gallium-opencl=icd -D opencl-spirv=true -D microsoft-clc=enabled -D static-libclc=all -D llvm=enabled -D spirv-to-dxil=true -D gles1=enabled -D gles2=enabled -D osmesa=true -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build
+        env:
+          DESTDIR: /home/runner/work/mesa/mesa/build/install
+
+      - name: Compile
+        run: ninja -C build/
+
+      - name: Install
+        run: ninja -C build/ install
+        env:
+          DESTDIR: /home/runner/work/mesa/mesa/build/install
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v3.0.0
+        with:
+          name: builds
+          path: build/install
