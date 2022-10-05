@@ -93,6 +93,7 @@ jobs:
           sed -i 's,"D$:/a/mesa/mesa/llvm/lib/LLVMCore.lib","D$:/a/mesa/mesa/llvm/lib/LLVMCore.lib" "D$:/a/mesa/mesa/llvm/lib/LLVMPasses.lib",g' build/build.ninja
           echo After edit:
           cat build/build.ninja
+        shell: bash
 
       - name: Compile
         run: |
