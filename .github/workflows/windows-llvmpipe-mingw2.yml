@@ -32,11 +32,11 @@ jobs:
         run: |
           echo Install dependencies...
           sudo apt-get update
-          sudo apt-get install wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build ccache -y
+          sudo apt-get install wine64 wine32 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build ccache -y
           sudo pip install meson mako
 
       - name: x86_build-mingw-patch
-        run: sudo bash .gitlab-ci/container/debian/x86_build-mingw-patch.sh
+        run: sudo bash my_scripts/x86_build-mingw-patch.sh
 
       - name: x86_build-mingw-source-deps
 #         run: sudo bash .gitlab-ci/container/debian/x86_build-mingw-source-deps.sh
@@ -45,6 +45,7 @@ jobs:
       - name: Configure
         run: |
           echo Configure...
+          echo $PATH
           mkdir -p build/install
           meson -D gallium-drivers="swrast,d3d12,zink" -D gallium-opencl=icd -D opencl-spirv=true -D microsoft-clc=enabled -D static-libclc=all -D llvm=enabled -D spirv-to-dxil=true -D gles1=enabled -D gles2=enabled -D osmesa=true -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build
 #          meson -D gallium-drivers="swrast,d3d12,zink" -D vulkan_drivers="swrast,amd,microsoft-experimental" -D gallium-opencl=icd -D opencl-spirv=true -D microsoft-clc=enabled -D static-libclc=all -D llvm=enabled -D spirv-to-dxil=true -D gles1=enabled -D gles2=enabled -D osmesa=true -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build
