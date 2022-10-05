@@ -56,7 +56,7 @@ cmake ../llvm \
 -DLLVM_ENABLE_RTTI=ON \
 -DCROSS_TOOLCHAIN_FLAGS_NATIVE=-DLLVM_EXTERNAL_SPIRV_HEADERS_SOURCE_DIR=$PWD/../../SPIRV-Tools/external/SPIRV-Headers \
 -DLLVM_EXTERNAL_SPIRV_HEADERS_SOURCE_DIR=$PWD/../../SPIRV-Tools/external/SPIRV-Headers \
--DLLVM_ENABLE_PROJECTS="clang;libclc" \
+-DLLVM_ENABLE_PROJECTS="clang" \
 -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
 -DLLVM_OPTIMIZED_TABLEGEN=TRUE \
 -DLLVM_ENABLE_ASSERTIONS=TRUE \
@@ -69,8 +69,36 @@ cmake ../llvm \
 -DLLVM_BUILD_LLVM_C_DYLIB=OFF \
 -DLLVM_ENABLE_DIA_SDK=OFF \
 -DCLANG_BUILD_TOOLS=ON \
--DLLVM_SPIRV_INCLUDE_TESTS=OFF \
+-DLLVM_SPIRV_INCLUDE_TESTS=OFF
+
+ninja install
+popd
+
+# Test llvm-config
+echo TEST
+/usr/x86_64-w64-mingw32/bin/llvm-config --version
+/usr/x86_64-w64-mingw32/bin/llvm-config --help
+ls -l /usr/x86_64-w64-mingw32/bin/
+wine64 /usr/x86_64-w64-mingw32/bin/llvm-config.exe --version
+wine64 /usr/x86_64-w64-mingw32/bin/llvm-config.exe --help
+echo TEST END
+
+# Building libclc
+mkdir llvm-project/build-libclc
+pushd llvm-project/build-libclc
+cmake ../libclc \
+-DCMAKE_TOOLCHAIN_FILE=$CMAKE_TOOLCHAIN_MINGW_PATH \
+-DCMAKE_INSTALL_PREFIX=/usr/x86_64-w64-mingw32/ \
+-GNinja -DCMAKE_BUILD_TYPE=Release \
+-DCMAKE_CROSSCOMPILING=1 \
+-DCMAKE_POLICY_DEFAULT_CMP0091=NEW \
 -DCMAKE_CXX_FLAGS="-m64" \
+-DLLVM_CONFIG="/usr/x86_64-w64-mingw32/bin/llvm-config" \
+-DLLVM_CLANG="/usr/x86_64-w64-mingw32/bin/clang" \
+-DLLVM_AS="/usr/x86_64-w64-mingw32/bin/llvm-as" \
+-DLLVM_LINK="/usr/x86_64-w64-mingw32/bin/llvm-link" \
+-DLLVM_OPT="/usr/x86_64-w64-mingw32/bin/opt" \
+-DLLVM_SPIRV="/usr/x86_64-w64-mingw32/bin/llvm-spirv" \
 -DLIBCLC_TARGETS_TO_BUILD="spirv-mesa3d-;spirv64-mesa3d-"
 
 ninja install
