@@ -87,6 +87,13 @@ jobs:
         env:
           CXXFLAGS: /MT
 
+      - name: Manually edit build.ninja
+        run: |
+          cat build/build.ninja
+          sed -i 's,"D$:/a/mesa/mesa/llvm/lib/LLVMCore.lib","D$:/a/mesa/mesa/llvm/lib/LLVMCore.lib" "D$:/a/mesa/mesa/llvm/lib/LLVMPasses.lib",g' build/build.ninja
+          echo After edit:
+          cat build/build.ninja
+
       - name: Compile
         run: |
           "C:\Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Auxiliary/Build/vcvars64.bat" && ninja -C build/
