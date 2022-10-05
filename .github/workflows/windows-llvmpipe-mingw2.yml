@@ -32,7 +32,7 @@ jobs:
         run: |
           echo Install dependencies...
           sudo apt-get update
-          sudo apt-get install wine64 wine32 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build ccache -y
+          sudo apt-get install wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build ccache -y
           sudo pip install meson mako
 
       - name: x86_build-mingw-patch
