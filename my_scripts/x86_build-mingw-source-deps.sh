@@ -76,6 +76,7 @@ popd
 
 # Test llvm-config
 echo TEST
+PATH=$PATH:/usr/x86_64-w64-mingw32/bin:/usr/x86_64-w64-mingw32/lib
 /usr/x86_64-w64-mingw32/bin/llvm-config --version
 /usr/x86_64-w64-mingw32/bin/llvm-config --help
 ls -l /usr/x86_64-w64-mingw32/bin/
