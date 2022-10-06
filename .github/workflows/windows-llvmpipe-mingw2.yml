@@ -39,15 +39,15 @@ jobs:
         run: sudo bash my_scripts/x86_build-mingw-patch.sh
 
       - name: x86_build-mingw-source-deps
-        run: sudo bash .gitlab-ci/container/debian/x86_build-mingw-source-deps.sh
-#         run: sudo bash my_scripts/x86_build-mingw-source-deps.sh
+#         run: sudo bash .gitlab-ci/container/debian/x86_build-mingw-source-deps.sh
+        run: sudo bash my_scripts/x86_build-mingw-source-deps.sh
 
       - name: Configure
         run: |
           echo Configure...
           echo $PATH
           mkdir -p build/install
-          meson -D gallium-drivers="swrast,d3d12,zink" -D gallium-opencl=icd -D opencl-spirv=true -D microsoft-clc=enabled -D static-libclc=all -D llvm=enabled -D spirv-to-dxil=true -D gles1=enabled -D gles2=enabled -D osmesa=true -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build
+          meson -D gallium-drivers="swrast,d3d12,zink" -D vulkan-drivers="swrast,amd,microsoft-experimental" -D gallium-opencl=icd -D opencl-spirv=true -D microsoft-clc=enabled -D static-libclc=all -D llvm=enabled -D spirv-to-dxil=true -D gles1=enabled -D gles2=enabled -D osmesa=true -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build
 #          meson -D gallium-drivers="swrast,d3d12,zink" -D vulkan_drivers="swrast,amd,microsoft-experimental" -D gallium-opencl=icd -D opencl-spirv=true -D microsoft-clc=enabled -D static-libclc=all -D llvm=enabled -D spirv-to-dxil=true -D gles1=enabled -D gles2=enabled -D osmesa=true -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build
         env:
           DESTDIR: /home/runner/work/mesa/mesa/build/install
