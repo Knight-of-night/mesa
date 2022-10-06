@@ -34,6 +34,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build ccache -y
           sudo pip install meson mako
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 14 all
 
       - name: x86_build-mingw-patch
         run: sudo bash my_scripts/x86_build-mingw-patch.sh
@@ -47,7 +50,7 @@ jobs:
           echo Configure...
           echo $PATH
           mkdir -p build-mini/install
-          meson -D gallium-drivers="swrast" -D llvm=enabled -D gles1=enabled -D gles2=enabled -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build-mini
+          meson -D gallium-drivers="swrast" -D llvm=enabled -D gles1=enabled -D gles2=enabled -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=x86_64-w64-mingw32-cross-llvm2.txt --buildtype=release build-mini
         env:
           DESTDIR: /home/runner/work/mesa/mesa/build-mini/install
 
