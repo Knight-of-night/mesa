@@ -46,9 +46,40 @@ jobs:
         run: |
           echo Configure...
           echo $PATH
+          mkdir -p build-mini/install
+          meson -D gallium-drivers="swrast" -D llvm=enabled -D gles1=enabled -D gles2=enabled -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build-mini
+        env:
+          DESTDIR: /home/runner/work/mesa/mesa/build-mini/install
+
+      - name: Compile
+        run: ninja -C build-mini/
+
+      - name: Install
+        run: ninja -C build-mini/ install
+        env:
+          DESTDIR: /home/runner/work/mesa/mesa/build-mini/install
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v3.0.0
+        with:
+          name: build-mini
+          path: build-mini/install
+
+      - name: Install glslangValidator
+        run: |
+          wget https://github.com/KhronosGroup/glslang/releases/download/master-tot/glslang-master-windows-x64-Release.zip
+          unzip glslang-master-windows-x64-Release.zip -d /usr/x86_64-w64-mingw32
+          echo wine64 glslangValidator > /usr/x86_64-w64-mingw32/bin/glslangValidator
+          chmod +x /usr/x86_64-w64-mingw32/bin/glslangValidator
+          echo wine64 spirv-remap > /usr/x86_64-w64-mingw32/bin/spirv-remap
+          chmod +x /usr/x86_64-w64-mingw32/bin/spirv-remap
+
+      - name: Configure
+        run: |
+          echo Configure...
+          echo $PATH
           mkdir -p build/install
           meson -D gallium-drivers="swrast,d3d12,zink" -D vulkan-drivers="swrast,amd,microsoft-experimental" -D gallium-opencl=icd -D opencl-spirv=true -D microsoft-clc=enabled -D static-libclc=all -D llvm=enabled -D spirv-to-dxil=true -D gles1=enabled -D gles2=enabled -D osmesa=true -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build
-#          meson -D gallium-drivers="swrast,d3d12,zink" -D vulkan_drivers="swrast,amd,microsoft-experimental" -D gallium-opencl=icd -D opencl-spirv=true -D microsoft-clc=enabled -D static-libclc=all -D llvm=enabled -D spirv-to-dxil=true -D gles1=enabled -D gles2=enabled -D osmesa=true -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=.gitlab-ci/x86_64-w64-mingw32 --buildtype=release build
         env:
           DESTDIR: /home/runner/work/mesa/mesa/build/install
 
@@ -63,5 +94,5 @@ jobs:
       - name: Upload a Build Artifact
         uses: actions/upload-artifact@v3.0.0
         with:
-          name: builds
+          name: build
           path: build/install
