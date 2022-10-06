@@ -3,6 +3,7 @@ c = 'x86_64-w64-mingw32-gcc-posix'
 cpp = 'x86_64-w64-mingw32-g++-posix'
 ar = 'x86_64-w64-mingw32-ar'
 strip = 'x86_64-w64-mingw32-strip'
+pkgconfig = '/usr/x86_64-w64-mingw32/bin/pkg-config'
 llvm-config = '/home/runner/work/mesa/mesa/my_scripts/llvm-config.sh'
 
 [host_machine]
