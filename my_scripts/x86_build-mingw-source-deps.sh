@@ -81,6 +81,7 @@ echo TEST
 ls -l /usr/x86_64-w64-mingw32/bin/
 wine64 /usr/x86_64-w64-mingw32/bin/llvm-config.exe --version
 wine64 /usr/x86_64-w64-mingw32/bin/llvm-config.exe --help
+ls -l /usr/x86_64-w64-mingw32/lib/
 echo TEST END
 
 # Building libclc
@@ -93,6 +94,7 @@ cmake ../libclc \
 -DCMAKE_CROSSCOMPILING=1 \
 -DCMAKE_POLICY_DEFAULT_CMP0091=NEW \
 -DCMAKE_CXX_FLAGS="-m64" \
+-DLLVM_VERSION=14.0.0 \
 -DLLVM_CONFIG="/usr/x86_64-w64-mingw32/bin/llvm-config" \
 -DLLVM_CLANG="/usr/x86_64-w64-mingw32/bin/clang" \
 -DLLVM_AS="/usr/x86_64-w64-mingw32/bin/llvm-as" \
