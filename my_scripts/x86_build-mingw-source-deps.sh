@@ -76,7 +76,7 @@ popd
 
 # Test llvm-config
 echo TEST
-PATH=$PATH:/usr/x86_64-w64-mingw32/bin:/usr/x86_64-w64-mingw32/lib
+# PATH=$PATH:/usr/x86_64-w64-mingw32/bin:/usr/x86_64-w64-mingw32/lib
 /usr/x86_64-w64-mingw32/bin/llvm-config --version
 /usr/x86_64-w64-mingw32/bin/llvm-config --help
 ls -l /usr/x86_64-w64-mingw32/bin/
@@ -96,7 +96,7 @@ cmake ../libclc \
 -DCMAKE_POLICY_DEFAULT_CMP0091=NEW \
 -DCMAKE_CXX_FLAGS="-m64" \
 -DLLVM_VERSION=14.0.0 \
--DLLVM_CONFIG="/usr/x86_64-w64-mingw32/bin/llvm-config" \
+-DLLVM_CONFIG="/home/runner/work/mesa/mesa/my_scripts/llvm-config.sh" \
 -DLLVM_CLANG="/usr/x86_64-w64-mingw32/bin/clang" \
 -DLLVM_AS="/usr/x86_64-w64-mingw32/bin/llvm-as" \
 -DLLVM_LINK="/usr/x86_64-w64-mingw32/bin/llvm-link" \
