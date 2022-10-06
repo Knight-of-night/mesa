@@ -40,7 +40,7 @@ chmod +x /usr/x86_64-w64-mingw32/bin/pkg-config
 
 cat >/usr/x86_64-w64-mingw32/bin/llvm-config <<EOF
 #!/bin/sh
-wine64 llvm-config \$@ | sed -e "s/Z:\//\//gi;s/C:\\\windows\\\system32\\\/\/usr\/x86_64-w64-mingw32\//gi;s/.exe//gi"
+wine64 llvm-config \$@ | sed -e "s/Z:\//\//gi;s/C:\\\windows\\\system32\\\/\/usr\/x86_64-w64-mingw32\//gi;s/\.exe//gi"
 EOF
 chmod +x /usr/x86_64-w64-mingw32/bin/llvm-config
 
