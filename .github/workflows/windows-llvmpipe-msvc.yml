@@ -79,10 +79,10 @@ jobs:
 
       - name: Manually edit meson.build
         run: |
-          cat build/build.ninja
-          sed -i "/dep_llvm = null_dep/a\llvm_modules = ['all']" build/build.ninja
+          cat meson.build
+          sed -i "/dep_llvm = null_dep/a\llvm_modules = ['all']" meson.build
           echo After edit:
-          cat build/build.ninja
+          cat meson.build
         shell: bash
 
       - name: Configure
