@@ -51,7 +51,7 @@ jobs:
           echo Configure...
           echo $PATH
           mkdir -p build-mini/install
-          meson -D gallium-drivers="swrast" -D llvm=enabled -D gles1=enabled -D gles2=enabled -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=x86_64-w64-mingw32-cross-llvm2.txt --buildtype=release build-mini
+          meson -D gallium-drivers="swrast" -D llvm=enabled -D cpp_rtti=true -D shared-glapi=enabled -D zlib=enabled --cross-file=x86_64-w64-mingw32-cross-llvm2.txt --buildtype=release build-mini
         env:
           DESTDIR: /home/runner/work/mesa/mesa/build-mini/install
 
@@ -68,3 +68,17 @@ jobs:
         with:
           name: build-mini
           path: build-mini/install
+
+      - name: Prepare dlls to upload
+        run: |
+          mkdir dlls
+          mkdir dlls/bin
+          mkdir dlls/lib
+          sudo mv /usr/x86_64-w64-mingw32/lib/*.dll dlls/lib
+          sudo mv /usr/x86_64-w64-mingw32/bin/*.dll dlls/bin
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v3.0.0
+        with:
+          name: dlls
+          path: dlls
