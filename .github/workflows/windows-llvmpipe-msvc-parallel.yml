@@ -97,7 +97,7 @@ jobs:
         shell: cmd
         env:
           CXXFLAGS: /MT
-          LP_NATIVE_VECTOR_WIDTH: ${{ lp_native_vector_width }}
+          LP_NATIVE_VECTOR_WIDTH: ${{ matrix.lp_native_vector_width }}
 
       - name: Compile
         run: |
@@ -112,5 +112,5 @@ jobs:
       - name: Upload a Build Artifact
         uses: actions/upload-artifact@v3.0.0
         with:
-          name: ${{ lp_native_vector_width }}
+          name: ${{ matrix.lp_native_vector_width }}
           path: build/install
