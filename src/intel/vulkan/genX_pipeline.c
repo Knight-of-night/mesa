@@ -1887,8 +1887,7 @@ emit_3dstate_primitive_replication(struct anv_graphics_pipeline *pipeline,
       return;
    }
 
-   uint32_t view_mask = rp->view_mask;
-   assert(replication_count == util_bitcount(view_mask));
+   assert(replication_count == util_bitcount(rp->view_mask));
    assert(replication_count <= MAX_VIEWS_FOR_PRIMITIVE_REPLICATION);
 
    anv_batch_emit(&pipeline->base.batch, GENX(3DSTATE_PRIMITIVE_REPLICATION), pr) {
@@ -2170,8 +2169,11 @@ genX(compute_pipeline_emit)(struct anv_compute_pipeline *pipeline)
       .SamplerCount           = GFX_VER == 11 ? 0 : get_sampler_count(cs_bin),
       /* We add 1 because the CS indirect parameters buffer isn't accounted
        * for in bind_map.surface_count.
+       *
+       * Typically set to 0 to avoid prefetching on every thread dispatch.
        */
-      .BindingTableEntryCount = 1 + MIN2(cs_bin->bind_map.surface_count, 30),
+      .BindingTableEntryCount = devinfo->verx10 == 125 ?
+         0 : 1 + MIN2(pipeline->cs->bind_map.surface_count, 30),
       .BarrierEnable          = cs_prog_data->uses_barrier,
       .SharedLocalMemorySize  =
          encode_slm_size(GFX_VER, cs_prog_data->base.total_shared),

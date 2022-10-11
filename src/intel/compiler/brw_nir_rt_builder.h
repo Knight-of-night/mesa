@@ -90,8 +90,6 @@ brw_load_eu_thread_simd(nir_builder *b)
 static inline nir_ssa_def *
 brw_nir_rt_async_stack_id(nir_builder *b)
 {
-   assert(gl_shader_stage_is_callable(b->shader->info.stage) ||
-          b->shader->info.stage == MESA_SHADER_RAYGEN);
    return nir_iadd(b, nir_umul_32x16(b, nir_load_ray_num_dss_rt_stacks_intel(b),
                                         brw_load_btd_dss_id(b)),
                       nir_load_btd_stack_id_intel(b));
@@ -165,7 +163,7 @@ brw_nir_num_rt_stacks(nir_builder *b,
                       const struct intel_device_info *devinfo)
 {
    return nir_imul_imm(b, nir_load_ray_num_dss_rt_stacks_intel(b),
-                          intel_device_info_num_dual_subslices(devinfo));
+                          intel_device_info_dual_subslice_id_bound(devinfo));
 }
 
 static inline nir_ssa_def *

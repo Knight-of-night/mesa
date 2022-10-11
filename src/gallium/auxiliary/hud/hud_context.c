@@ -1443,8 +1443,7 @@ hud_parse_env_var(struct hud_context *hud, struct pipe_screen *screen,
          if (added && !list_is_empty(&pane->graph_list)) {
             struct hud_graph *graph;
             graph = list_entry(pane->graph_list.prev, struct hud_graph, head);
-            strncpy(graph->name, s, sizeof(graph->name)-1);
-            graph->name[sizeof(graph->name)-1] = 0;
+            snprintf(graph->name, sizeof(graph->name), "%s", s);
          }
       }
 
@@ -1946,7 +1945,6 @@ hud_create(struct cso_context *cso, struct st_context_iface *st,
    hud->font_sampler_state.wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
    hud->font_sampler_state.wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
    hud->font_sampler_state.wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
-   hud->font_sampler_state.normalized_coords = 1;
 
    /* constants */
    hud->constbuf.buffer_size = sizeof(hud->constants);

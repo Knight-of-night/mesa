@@ -1348,6 +1348,7 @@ add_deferred_attribute_culling(nir_builder *b, nir_cf_list *original_extracted_c
 
       /* ES invocations store their vertex data to LDS for GS threads to read. */
       if_es_thread = nir_push_if(b, nir_has_input_vertex_amd(b));
+      if_es_thread->control = nir_selection_control_divergent_always_taken;
       {
          /* Store position components that are relevant to culling in LDS */
          nir_ssa_def *pre_cull_pos = nir_load_var(b, position_value_var);
@@ -1424,6 +1425,7 @@ add_deferred_attribute_culling(nir_builder *b, nir_cf_list *original_extracted_c
 
       /* ES invocations load their accepted flag from LDS. */
       if_es_thread = nir_push_if(b, nir_has_input_vertex_amd(b));
+      if_es_thread->control = nir_selection_control_divergent_always_taken;
       {
          nir_ssa_def *accepted = nir_load_shared(b, 1, 8u, es_vertex_lds_addr, .base = lds_es_vertex_accepted, .align_mul = 4u);
          nir_ssa_def *accepted_bool = nir_ine(b, accepted, nir_imm_intN_t(b, 0, 8));
@@ -3880,8 +3882,8 @@ ms_calculate_output_layout(unsigned api_shared_size,
    ms_out_mem_layout l = { .lds = { .total_size = api_shared_size } };
 
    /* Outputs without cross-invocation access can be stored in variables. */
-   l.var.vtx_attr.mask = per_vertex_output_mask & ~lds_per_vertex_output_mask;
-   l.var.prm_attr.mask = per_primitive_output_mask & ~lds_per_primitive_output_mask;
+   l.var.vtx_attr.mask = per_vertex_output_mask & ~cross_invocation_output_access;
+   l.var.prm_attr.mask = per_primitive_output_mask & ~cross_invocation_output_access;
 
    /* Workgroup information, see ms_workgroup_* for the layout. */
    l.lds.workgroup_info_addr = ALIGN(l.lds.total_size, 16);

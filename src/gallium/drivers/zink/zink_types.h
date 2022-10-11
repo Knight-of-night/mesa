@@ -97,6 +97,8 @@ typedef enum {
    ZINK_NO_DYNAMIC_STATE,
    ZINK_DYNAMIC_STATE,
    ZINK_DYNAMIC_STATE2,
+   ZINK_DYNAMIC_VERTEX_INPUT2,
+   ZINK_DYNAMIC_STATE3,
    ZINK_DYNAMIC_VERTEX_INPUT,
 } zink_dynamic_state;
 
@@ -105,6 +107,10 @@ typedef enum {
    ZINK_PIPELINE_DYNAMIC_STATE,
    ZINK_PIPELINE_DYNAMIC_STATE2,
    ZINK_PIPELINE_DYNAMIC_STATE2_PCP,
+   ZINK_PIPELINE_DYNAMIC_VERTEX_INPUT2,
+   ZINK_PIPELINE_DYNAMIC_VERTEX_INPUT2_PCP,
+   ZINK_PIPELINE_DYNAMIC_STATE3,
+   ZINK_PIPELINE_DYNAMIC_STATE3_PCP,
    ZINK_PIPELINE_DYNAMIC_VERTEX_INPUT,
    ZINK_PIPELINE_DYNAMIC_VERTEX_INPUT_PCP,
 } zink_pipeline_dynamic_state;
@@ -180,6 +186,7 @@ enum zink_debug {
    ZINK_DEBUG_SYNC = (1<<4),
    ZINK_DEBUG_COMPACT = (1<<5),
    ZINK_DEBUG_NOREORDER = (1<<6),
+   ZINK_DEBUG_GPL = (1<<7),
 };
 
 
@@ -220,6 +227,7 @@ struct zink_vertex_elements_hw_state {
       } b;
       VkVertexInputBindingDescription2EXT dynbindings[PIPE_MAX_ATTRIBS];
    };
+   uint8_t binding_map[PIPE_MAX_ATTRIBS];
 };
 
 struct zink_vertex_elements_state {
@@ -229,7 +237,6 @@ struct zink_vertex_elements_state {
       VkVertexInputRate inputRate;
    } bindings[PIPE_MAX_ATTRIBS];
    uint32_t divisor[PIPE_MAX_ATTRIBS];
-   uint8_t binding_map[PIPE_MAX_ATTRIBS];
    uint32_t min_stride[PIPE_MAX_ATTRIBS]; //for dynamic_state1
    uint32_t decomposed_attrs;
    unsigned decomposed_attrs_size;
@@ -248,13 +255,11 @@ struct zink_rasterizer_hw_state {
    unsigned polygon_mode : 2; //VkPolygonMode
    unsigned line_mode : 2; //VkLineRasterizationModeEXT
    unsigned depth_clip:1;
+   unsigned depth_clamp:1;
    unsigned pv_last:1;
    unsigned line_stipple_enable:1;
-   unsigned force_persample_interp:1;
    unsigned clip_halfz:1;
 };
-#define ZINK_RAST_HW_STATE_SIZE 9
-
 
 struct zink_rasterizer_state {
    struct pipe_rasterizer_state base;
@@ -269,6 +274,12 @@ struct zink_rasterizer_state {
 struct zink_blend_state {
    uint32_t hash;
    VkPipelineColorBlendAttachmentState attachments[PIPE_MAX_COLOR_BUFS];
+
+   struct {
+      VkBool32 enables[PIPE_MAX_COLOR_BUFS];
+      VkColorBlendEquationEXT eq[PIPE_MAX_COLOR_BUFS];
+      VkColorComponentFlags wrmask[PIPE_MAX_COLOR_BUFS];
+   } ds3;
 
    VkBool32 logicop_enable;
    VkLogicOp logicop_func;
@@ -640,15 +651,18 @@ struct zink_pipeline_dynamic_state2 {
    uint16_t vertices_per_patch; //5 bits
 };
 
+#define zink_pipeline_dynamic_state3 zink_rasterizer_hw_state
+
 struct zink_gfx_pipeline_state {
-   uint32_t rast_state : ZINK_RAST_HW_STATE_SIZE; //zink_rasterizer_hw_state
-   uint32_t _pad1 : 6;
-   uint32_t force_persample_interp:1; //duplicated for gpl hashing
-   /* order matches zink_gfx_output_key: uint16_t offset */
-   uint32_t rast_samples:8; // 2 extra bits (can be used for new members)
-   uint32_t min_samples:8; // 2 extra bits (can be used for new members)
+   /* order matches zink_gfx_output_key */
+   unsigned force_persample_interp:1;
+   uint32_t rast_samples:6;
+   uint32_t min_samples:6;
+   uint32_t feedback_loop : 1;
+   uint32_t feedback_loop_zs : 1;
+   uint32_t rast_attachment_order : 1;
+   uint32_t rp_state : 16;
    VkSampleMask sample_mask;
-   unsigned rp_state;
    uint32_t blend_id;
 
    /* Pre-hashed value for table lookup, invalid when zero.
@@ -659,9 +673,8 @@ struct zink_gfx_pipeline_state {
    struct zink_pipeline_dynamic_state1 dyn_state1;
 
    struct zink_pipeline_dynamic_state2 dyn_state2;
+   struct zink_pipeline_dynamic_state3 dyn_state3;
 
-   uint32_t _pad;
-   uint32_t gkey; //for pipeline library lookups
    union {
       VkShaderModule modules[MESA_SHADER_STAGES - 1];
       uint32_t optimal_key;
@@ -773,11 +786,8 @@ struct zink_program {
 typedef bool (*equals_gfx_pipeline_state_func)(const void *a, const void *b);
 
 struct zink_gfx_library_key {
-   uint32_t hw_rast_state;
-   union {
-      VkShaderModule modules[ZINK_GFX_SHADER_COUNT];
-      uint32_t optimal_key; //equals_pipeline_lib_optimal
-   };
+   uint32_t optimal_key; //equals_pipeline_lib_optimal
+   VkShaderModule modules[ZINK_GFX_SHADER_COUNT];
    VkPipeline pipeline;
 };
 
@@ -796,13 +806,22 @@ struct zink_gfx_input_key {
 };
 
 struct zink_gfx_output_key {
-   uint32_t _pad:15;
-   uint32_t force_persample_interp:1;
-   uint32_t rast_samples:8; // 2 extra bits (can be used for new members)
-   uint32_t min_samples:8; // 2 extra bits (can be used for new members)
-   VkSampleMask sample_mask;
+   /* order matches zink_gfx_output_key */
+   union {
+      struct {
+         unsigned force_persample_interp:1;
+         uint32_t rast_samples:6;
+         uint32_t min_samples:6;
+         uint32_t feedback_loop : 1;
+         uint32_t feedback_loop_zs : 1;
+         uint32_t rast_attachment_order : 1;
+         uint32_t rp_state : 16;
+      };
+      uint32_t key;
+   };
 
-   unsigned rp_state;
+   /* TODO: compress these */
+   VkSampleMask sample_mask;
    uint32_t blend_id;
    VkPipeline pipeline;
 };
@@ -833,7 +852,7 @@ struct zink_gfx_program {
    uint32_t last_finalized_hash[2][4]; //[dynamic, renderpass][primtype idx]
    VkPipeline last_pipeline[2][4]; //[dynamic, renderpass][primtype idx]
 
-   struct set libs[4]; //zink_gfx_library_key[primtype] -> VkPipeline
+   struct set libs; //zink_gfx_library_key -> VkPipeline
 };
 
 struct zink_compute_program {
@@ -866,12 +885,10 @@ struct zink_rt_attrib {
      bool clear_stencil;
      bool fbfetch;
   };
-  union {
-     bool invalid;
-     bool needs_write;
-  };
+  bool invalid;
+  bool needs_write;
   bool resolve;
-  bool mixed_zs;
+  bool feedback_loop;
 };
 
 struct zink_render_pass_state {
@@ -993,14 +1010,15 @@ struct zink_resource {
          uint32_t ssbo_bind_mask[MESA_SHADER_STAGES];
       };
       struct {
+         bool linear;
+         bool need_2D;
+         bool valid;
+         uint8_t fb_bind_count; //not counted in all_binds
+         uint16_t fb_binds; /* mask of attachment idx; zs is PIPE_MAX_COLOR_BUFS */
          VkSparseImageMemoryRequirements sparse;
          VkFormat format;
          VkImageLayout layout;
          VkImageAspectFlags aspect;
-         bool linear;
-         bool need_2D;
-         bool valid;
-         uint8_t fb_binds; //not counted in all_binds
       };
    };
    uint32_t sampler_binds[MESA_SHADER_STAGES];
@@ -1121,6 +1139,7 @@ struct zink_screen {
    struct nir_shader_compiler_options nir_options;
 
    bool optimal_keys;
+   bool have_full_ds3;
    bool have_X8_D24_UNORM_PACK32;
    bool have_D24_UNORM_S8_UINT;
    bool have_D32_SFLOAT_S8_UINT;
@@ -1165,7 +1184,8 @@ struct zink_screen {
       bool broken_l4a4;
       bool depth_clip_control_missing;
       bool implicit_sync;
-      bool force_pipeline_library;
+      bool always_feedback_loop;
+      bool always_feedback_loop_zs;
       unsigned z16_unscaled_bias;
       unsigned z24_unscaled_bias;
    } driver_workarounds;
@@ -1438,7 +1458,6 @@ struct zink_context {
    struct set rendering_state_cache;
    struct set render_pass_state_cache;
    struct hash_table *render_pass_cache;
-   bool new_swapchain;
    VkExtent2D swapchain_size;
    bool fb_changed;
    bool rp_changed; //force renderpass restart
@@ -1451,6 +1470,7 @@ struct zink_context {
    uint16_t rp_clears_enabled;
    uint16_t void_clears;
    uint16_t fbfetch_outputs;
+   uint16_t feedback_loops;
    struct zink_resource *needs_present;
 
    struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
@@ -1559,6 +1579,7 @@ struct zink_context {
    bool primitive_restart;
    bool vertex_state_changed : 1;
    bool blend_state_changed : 1;
+   bool sample_mask_changed : 1;
    bool rast_state_changed : 1;
    bool dsa_state_changed : 1;
    bool stencil_ref_changed : 1;

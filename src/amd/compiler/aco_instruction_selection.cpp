@@ -3686,17 +3686,20 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
 
          nir_const_value* const_offset = nir_src_as_const_value(instr->src[1].src);
          nir_const_value* const_bits = nir_src_as_const_value(instr->src[2].src);
+         aco_opcode opcode =
+            instr->op == nir_op_ubfe ? aco_opcode::s_bfe_u32 : aco_opcode::s_bfe_i32;
          if (const_offset && const_bits) {
             uint32_t extract = (const_bits->u32 << 16) | (const_offset->u32 & 0x1f);
-            aco_opcode opcode =
-               instr->op == nir_op_ubfe ? aco_opcode::s_bfe_u32 : aco_opcode::s_bfe_i32;
             bld.sop2(opcode, Definition(dst), bld.def(s1, scc), base, Operand::c32(extract));
             break;
          }
 
          Temp offset = get_alu_src(ctx, instr->src[1]);
          Temp bits = get_alu_src(ctx, instr->src[2]);
-         if (instr->op == nir_op_ubfe) {
+         if (ctx->program->gfx_level >= GFX9) {
+            Temp extract = bld.sop2(aco_opcode::s_pack_ll_b32_b16, bld.def(s1), offset, bits);
+            bld.sop2(opcode, Definition(dst), bld.def(s1, scc), base, extract);
+         } else if (instr->op == nir_op_ubfe) {
             Temp mask = bld.sop2(aco_opcode::s_bfm_b32, bld.def(s1), bits, offset);
             Temp masked =
                bld.sop2(aco_opcode::s_and_b32, bld.def(s1), bld.def(s1, scc), base, mask);
@@ -7467,6 +7470,8 @@ visit_shared_atomic(isel_context* ctx, nir_intrinsic_instr* instr)
    if (num_operands == 4) {
       Temp data2 = as_vgpr(ctx, get_ssa_temp(ctx, instr->src[2].ssa));
       ds->operands[2] = Operand(data2);
+      if (bld.program->gfx_level >= GFX11)
+         std::swap(ds->operands[1], ds->operands[2]);
    }
    ds->operands[num_operands - 1] = m;
    ds->offset0 = offset;
@@ -10383,7 +10388,8 @@ visit_loop(isel_context* ctx, nir_loop* loop)
 }
 
 static void
-begin_divergent_if_then(isel_context* ctx, if_context* ic, Temp cond)
+begin_divergent_if_then(isel_context* ctx, if_context* ic, Temp cond,
+                        nir_selection_control sel_ctrl = nir_selection_control_none)
 {
    ic->cond = cond;
 
@@ -10397,6 +10403,7 @@ begin_divergent_if_then(isel_context* ctx, if_context* ic, Temp cond)
                                                               Format::PSEUDO_BRANCH, 1, 1));
    branch->definitions[0] = Definition(ctx->program->allocateTmp(s2));
    branch->operands[0] = Operand(cond);
+   branch->selection_control = sel_ctrl;
    ctx->block->instructions.push_back(std::move(branch));
 
    ic->BB_if_idx = ctx->block->index;
@@ -10427,7 +10434,8 @@ begin_divergent_if_then(isel_context* ctx, if_context* ic, Temp cond)
 }
 
 static void
-begin_divergent_if_else(isel_context* ctx, if_context* ic)
+begin_divergent_if_else(isel_context* ctx, if_context* ic,
+                        nir_selection_control sel_ctrl = nir_selection_control_none)
 {
    Block* BB_then_logical = ctx->block;
    append_logical_end(BB_then_logical);
@@ -10465,6 +10473,7 @@ begin_divergent_if_else(isel_context* ctx, if_context* ic)
    branch.reset(create_instruction<Pseudo_branch_instruction>(aco_opcode::p_branch,
                                                               Format::PSEUDO_BRANCH, 0, 1));
    branch->definitions[0] = Definition(ctx->program->allocateTmp(s2));
+   branch->selection_control = sel_ctrl;
    ctx->block->instructions.push_back(std::move(branch));
 
    ic->exec_potentially_empty_discard_old |= ctx->cf_info.exec_potentially_empty_discard;
@@ -10695,10 +10704,10 @@ visit_if(isel_context* ctx, nir_if* if_stmt)
        * *) Exceptions may be due to break and continue statements within loops
        **/
 
-      begin_divergent_if_then(ctx, &ic, cond);
+      begin_divergent_if_then(ctx, &ic, cond, if_stmt->control);
       visit_cf_list(ctx, &if_stmt->then_list);
 
-      begin_divergent_if_else(ctx, &ic);
+      begin_divergent_if_else(ctx, &ic, if_stmt->control);
       visit_cf_list(ctx, &if_stmt->else_list);
 
       end_divergent_if(ctx, &ic);

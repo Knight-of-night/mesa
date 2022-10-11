@@ -251,16 +251,16 @@ generate_compute(struct llvmpipe_context *lp,
       args[17] = coro_hdl_idx;
 
       args[18] = coro_mem;
-      LLVMValueRef coro_entry = LLVMBuildGEP(gallivm->builder, coro_hdls, &coro_hdl_idx, 1, "");
+      LLVMValueRef coro_entry = LLVMBuildGEP2(gallivm->builder, hdl_ptr_type, coro_hdls, &coro_hdl_idx, 1, "");
 
-      LLVMValueRef coro_hdl = LLVMBuildLoad(gallivm->builder, coro_entry, "coro_hdl");
+      LLVMValueRef coro_hdl = LLVMBuildLoad2(gallivm->builder, hdl_ptr_type, coro_entry, "coro_hdl");
 
       struct lp_build_if_state ifstate;
       LLVMValueRef cmp = LLVMBuildICmp(gallivm->builder, LLVMIntEQ, loop_state[3].counter,
                                        lp_build_const_int32(gallivm, 0), "");
       /* first time here - call the coroutine function entry point */
       lp_build_if(&ifstate, gallivm, cmp);
-      LLVMValueRef coro_ret = LLVMBuildCall(gallivm->builder, coro, args, 19, "");
+      LLVMValueRef coro_ret = LLVMBuildCall2(gallivm->builder, coro_func_type, coro, args, 19, "");
       LLVMBuildStore(gallivm->builder, coro_ret, coro_entry);
       lp_build_else(&ifstate);
       /* subsequent calls for this invocation - check if done. */
@@ -290,8 +290,10 @@ generate_compute(struct llvmpipe_context *lp,
                           lp_build_const_int32(gallivm, end_coroutine),
                           NULL, LLVMIntEQ);
 
-   LLVMValueRef coro_mem_ptr = LLVMBuildLoad(builder, coro_mem, "");
-   LLVMBuildCall(gallivm->builder, gallivm->coro_free_hook, &coro_mem_ptr, 1, "");
+   LLVMValueRef coro_mem_ptr = LLVMBuildLoad2(builder, hdl_ptr_type, coro_mem, "");
+   LLVMTypeRef mem_ptr_type = LLVMPointerType(LLVMInt8TypeInContext(gallivm->context), 0);
+   LLVMTypeRef free_type = LLVMFunctionType(LLVMVoidTypeInContext(gallivm->context), &mem_ptr_type, 1, 0);
+   LLVMBuildCall2(gallivm->builder, free_type, gallivm->coro_free_hook, &coro_mem_ptr, 1, "");
 
    LLVMBuildRetVoid(builder);
 
@@ -327,11 +329,19 @@ generate_compute(struct llvmpipe_context *lp,
       struct lp_bld_tgsi_system_values system_values;
 
       memset(&system_values, 0, sizeof(system_values));
-      consts_ptr = lp_jit_cs_context_constants(gallivm, context_ptr);
-      ssbo_ptr = lp_jit_cs_context_ssbos(gallivm, context_ptr);
-      kernel_args_ptr = lp_jit_cs_context_kernel_args(gallivm, context_ptr);
+      consts_ptr = lp_jit_cs_context_constants(gallivm,
+                                               variant->jit_cs_context_type,
+                                               context_ptr);
+      ssbo_ptr = lp_jit_cs_context_ssbos(gallivm,
+                                         variant->jit_cs_context_type,
+                                         context_ptr);
+      kernel_args_ptr = lp_jit_cs_context_kernel_args(gallivm,
+                                                      variant->jit_cs_context_type,
+                                                      context_ptr);
 
-      shared_ptr = lp_jit_cs_thread_data_shared(gallivm, thread_data_ptr);
+      shared_ptr = lp_jit_cs_thread_data_shared(gallivm,
+                                                variant->jit_cs_thread_data_type,
+                                                thread_data_ptr);
 
       LLVMValueRef coro_num_hdls = LLVMBuildMul(gallivm->builder, num_x_loop, block_y_size_arg, "");
       coro_num_hdls = LLVMBuildMul(gallivm->builder, coro_num_hdls, block_z_size_arg, "");
@@ -339,9 +349,9 @@ generate_compute(struct llvmpipe_context *lp,
       /* these are coroutine entrypoint necessities */
       LLVMValueRef coro_id = lp_build_coro_id(gallivm);
       LLVMValueRef coro_entry = lp_build_coro_alloc_mem_array(gallivm, coro_mem, coro_idx, coro_num_hdls);
-
-      LLVMValueRef alloced_ptr = LLVMBuildLoad(gallivm->builder, coro_mem, "");
-      alloced_ptr = LLVMBuildGEP(gallivm->builder, alloced_ptr, &coro_entry, 1, "");
+      LLVMTypeRef mem_ptr_type = LLVMInt8TypeInContext(gallivm->context);
+      LLVMValueRef alloced_ptr = LLVMBuildLoad2(gallivm->builder, hdl_ptr_type, coro_mem, "");
+      alloced_ptr = LLVMBuildGEP2(gallivm->builder, mem_ptr_type, alloced_ptr, &coro_entry, 1, "");
       LLVMValueRef coro_hdl = lp_build_coro_begin(gallivm, coro_id, alloced_ptr);
       LLVMValueRef has_partials = LLVMBuildICmp(gallivm->builder, LLVMIntNE, partials, lp_build_const_int32(gallivm, 0), "");
       LLVMValueRef tid_vals[3];
@@ -405,20 +415,21 @@ generate_compute(struct llvmpipe_context *lp,
       LLVMValueRef last_x_loop = LLVMBuildICmp(gallivm->builder, LLVMIntEQ, x_size_arg, LLVMBuildSub(gallivm->builder, num_x_loop, lp_build_const_int32(gallivm, 1), ""), "");
       LLVMValueRef use_partial_mask = LLVMBuildAnd(gallivm->builder, last_x_loop, has_partials, "");
       struct lp_build_if_state if_state;
-      LLVMValueRef mask_val = lp_build_alloca(gallivm, LLVMVectorType(int32_type, cs_type.length), "mask");
+      LLVMTypeRef mask_type = LLVMVectorType(int32_type, cs_type.length);
+      LLVMValueRef mask_val = lp_build_alloca(gallivm, mask_type, "mask");
       LLVMValueRef full_mask_val = lp_build_const_int_vec(gallivm, cs_type, ~0);
       LLVMBuildStore(gallivm->builder, full_mask_val, mask_val);
 
       lp_build_if(&if_state, gallivm, use_partial_mask);
       struct lp_build_loop_state mask_loop_state;
       lp_build_loop_begin(&mask_loop_state, gallivm, partials);
-      LLVMValueRef tmask_val = LLVMBuildLoad(gallivm->builder, mask_val, "");
+      LLVMValueRef tmask_val = LLVMBuildLoad2(gallivm->builder, mask_type, mask_val, "");
       tmask_val = LLVMBuildInsertElement(gallivm->builder, tmask_val, lp_build_const_int32(gallivm, 0), mask_loop_state.counter, "");
       LLVMBuildStore(gallivm->builder, tmask_val, mask_val);
       lp_build_loop_end_cond(&mask_loop_state, vec_length, NULL, LLVMIntUGE);
       lp_build_endif(&if_state);
 
-      mask_val = LLVMBuildLoad(gallivm->builder, mask_val, "");
+      mask_val = LLVMBuildLoad2(gallivm->builder, mask_type, mask_val, "");
       lp_build_mask_begin(&mask, gallivm, cs_type, mask_val);
 
       struct lp_build_coro_suspend_info coro_info;
@@ -436,6 +447,7 @@ generate_compute(struct llvmpipe_context *lp,
       params.mask = &mask;
       params.consts_ptr = consts_ptr;
       params.system_values = &system_values;
+      params.context_type = variant->jit_cs_context_type;
       params.context_ptr = context_ptr;
       params.sampler = sampler;
       params.info = &shader->info.base;
@@ -444,7 +456,9 @@ generate_compute(struct llvmpipe_context *lp,
       params.shared_ptr = shared_ptr;
       params.coro = &coro_info;
       params.kernel_args = kernel_args_ptr;
-      params.aniso_filter_table = lp_jit_cs_context_aniso_filter_table(gallivm, context_ptr);
+      params.aniso_filter_table = lp_jit_cs_context_aniso_filter_table(gallivm,
+                                                                       variant->jit_cs_context_type,
+                                                                       context_ptr);
 
       if (shader->base.type == PIPE_SHADER_IR_TGSI)
          lp_build_tgsi_soa(gallivm, shader->base.tokens, &params, NULL);

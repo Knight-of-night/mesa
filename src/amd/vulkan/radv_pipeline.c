@@ -227,11 +227,6 @@ radv_pipeline_destroy(struct radv_device *device, struct radv_pipeline *pipeline
       radv_pipeline_layout_finish(device, &gfx_pipeline_lib->layout);
 
       for (unsigned i = 0; i < MESA_VULKAN_SHADER_STAGES; ++i) {
-         if (pipeline->shaders[i]) {
-            free(pipeline->shaders[i]->binary);
-            pipeline->shaders[i]->binary = NULL;
-         }
-
          ralloc_free(pipeline->retained_shaders[i].nir);
       }
 
@@ -876,7 +871,8 @@ radv_pipeline_init_blend_state(struct radv_graphics_pipeline *pipeline,
    else
       cb_color_control |= S_028808_MODE(V_028808_CB_DISABLE);
 
-   radv_pipeline_compute_spi_color_formats(pipeline, &blend, state, has_ps_epilog);
+   if (state->rp)
+      radv_pipeline_compute_spi_color_formats(pipeline, &blend, state, has_ps_epilog);
 
    pipeline->cb_color_control = cb_color_control;
 
@@ -1521,6 +1517,25 @@ radv_get_attrib_stride(const VkPipelineVertexInputStateCreateInfo *vi, uint32_t 
     VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT | \
     VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)
 
+static VkGraphicsPipelineLibraryFlagBitsEXT
+shader_stage_to_pipeline_library_flags(VkShaderStageFlagBits stage)
+{
+   assert(util_bitcount(stage) == 1);
+   switch (stage) {
+   case VK_SHADER_STAGE_VERTEX_BIT:
+   case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
+   case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
+   case VK_SHADER_STAGE_GEOMETRY_BIT:
+   case VK_SHADER_STAGE_TASK_BIT_EXT:
+   case VK_SHADER_STAGE_MESH_BIT_EXT:
+      return VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT;
+   case VK_SHADER_STAGE_FRAGMENT_BIT:
+      return VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT;
+   default:
+      unreachable("Invalid shader stage");
+   }
+}
+
 static VkResult
 radv_pipeline_import_graphics_info(struct radv_graphics_pipeline *pipeline,
                                    struct vk_graphics_pipeline_state *state,
@@ -1544,6 +1559,10 @@ radv_pipeline_import_graphics_info(struct radv_graphics_pipeline *pipeline,
    /* Mark all active stages at pipeline creation. */
    for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
       const VkPipelineShaderStageCreateInfo *sinfo = &pCreateInfo->pStages[i];
+
+      /* Ignore shader stages that don't need to be imported. */
+      if (!(shader_stage_to_pipeline_library_flags(sinfo->stage) & lib_flags))
+         continue;
 
       pipeline->active_stages |= sinfo->stage;
    }
@@ -1628,12 +1647,23 @@ radv_graphics_pipeline_import_lib(struct radv_graphics_pipeline *pipeline,
          continue;
 
       pipeline->base.shaders[s] = radv_shader_ref(lib->base.base.shaders[s]);
+
+      /* Hold a pointer to the slab BO to indicate the shader is already uploaded. */
+      pipeline->base.shaders[s]->bo = lib->base.base.slab_bo;
    }
 
    /* Import the GS copy shader if present. */
    if (lib->base.base.gs_copy_shader) {
       assert(!pipeline->base.gs_copy_shader);
       pipeline->base.gs_copy_shader = radv_shader_ref(lib->base.base.gs_copy_shader);
+
+      /* Hold a pointer to the slab BO to indicate the shader is already uploaded. */
+      pipeline->base.gs_copy_shader->bo = lib->base.base.slab_bo;
+   }
+
+   /* Refcount the slab BO to make sure it's not freed when the library is destroyed. */
+   if (lib->base.base.slab) {
+      p_atomic_inc(&lib->base.base.slab->ref_count);
    }
 
    /* Import the PS epilog if present. */
@@ -2745,7 +2775,7 @@ radv_generate_graphics_pipeline_key(const struct radv_graphics_pipeline *pipelin
    const struct radv_physical_device *pdevice = device->physical_device;
    struct radv_pipeline_key key = radv_generate_pipeline_key(&pipeline->base, pCreateInfo->flags);
 
-   key.has_multiview_view_index = !!state->rp->view_mask;
+   key.has_multiview_view_index = state->rp ? !!state->rp->view_mask : 0;
 
    if (pipeline->dynamic_states & RADV_DYNAMIC_VERTEX_INPUT) {
       key.vs.has_prolog = true;
@@ -3198,10 +3228,13 @@ radv_upload_shaders(struct radv_device *device, struct radv_pipeline *pipeline)
       if (!shader)
          continue;
 
+      if (shader->bo)
+         continue;
+
       code_size += align(shader->code_size, RADV_SHADER_ALLOC_ALIGNMENT);
    }
 
-   if (pipeline->gs_copy_shader) {
+   if (pipeline->gs_copy_shader && !pipeline->gs_copy_shader->bo) {
       code_size += align(pipeline->gs_copy_shader->code_size, RADV_SHADER_ALLOC_ALIGNMENT);
    }
 
@@ -3222,6 +3255,9 @@ radv_upload_shaders(struct radv_device *device, struct radv_pipeline *pipeline)
       if (!shader)
          continue;
 
+      if (shader->bo)
+         continue;
+
       shader->va = slab_va + slab_offset;
 
       void *dest_ptr = slab_ptr + slab_offset;
@@ -3231,7 +3267,7 @@ radv_upload_shaders(struct radv_device *device, struct radv_pipeline *pipeline)
       slab_offset += align(shader->code_size, RADV_SHADER_ALLOC_ALIGNMENT);
    }
 
-   if (pipeline->gs_copy_shader) {
+   if (pipeline->gs_copy_shader && !pipeline->gs_copy_shader->bo) {
       pipeline->gs_copy_shader->va = slab_va + slab_offset;
 
       void *dest_ptr = slab_ptr + slab_offset;
@@ -4186,13 +4222,13 @@ radv_create_shaders(struct radv_pipeline *pipeline, struct radv_pipeline_layout 
       }
    }
 
-   if (pipeline->gs_copy_shader && !(flags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR)) {
+   if (pipeline->gs_copy_shader) {
       free(pipeline->gs_copy_shader->binary);
       pipeline->gs_copy_shader->binary = NULL;
    }
 
    for (int i = 0; i < MESA_VULKAN_SHADER_STAGES; ++i) {
-      if (pipeline->shaders[i] && !(flags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR)) {
+      if (pipeline->shaders[i]) {
          free(pipeline->shaders[i]->binary);
          pipeline->shaders[i]->binary = NULL;
       }
@@ -5924,6 +5960,7 @@ radv_pipeline_init_vertex_input_state(struct radv_graphics_pipeline *pipeline,
          uint32_t binding = state->vi->attributes[i].binding;
          uint32_t offset = state->vi->attributes[i].offset;
 
+         pipeline->vs_input_state.attribute_mask |= BITFIELD_BIT(i);
          pipeline->vs_input_state.bindings[i] = binding;
          pipeline->vs_input_state.bindings_match_attrib &= binding == i;
 
@@ -6179,7 +6216,7 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
    radv_pipeline_init_dynamic_state(pipeline, &state);
 
    if (state.vp)
-      pipeline->negative_one_to_one = state.vp->negative_one_to_one;
+      pipeline->negative_one_to_one = state.vp->depth_clip_negative_one_to_one;
 
    radv_pipeline_init_raster_state(pipeline, &state);
 
@@ -6188,6 +6225,9 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
 
    if (device->physical_device->rad_info.gfx_level >= GFX10_3)
       gfx103_pipeline_init_vrs_state(pipeline, &state);
+
+   /* Copy the non-compacted SPI_SHADER_COL_FORMAT which is used to emit RBPLUS state. */
+   pipeline->col_format_non_compacted = blend.spi_shader_col_format;
 
    struct radv_shader *ps = pipeline->base.shaders[MESA_SHADER_FRAGMENT];
    if (!ps->info.ps.has_epilog) {
@@ -6211,8 +6251,10 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
     */
    if ((device->physical_device->rad_info.gfx_level <= GFX9 || ps->info.ps.can_discard) &&
        !blend.spi_shader_col_format) {
-      if (!ps->info.ps.writes_z && !ps->info.ps.writes_stencil && !ps->info.ps.writes_sample_mask)
+      if (!ps->info.ps.writes_z && !ps->info.ps.writes_stencil && !ps->info.ps.writes_sample_mask) {
          blend.spi_shader_col_format = V_028714_SPI_SHADER_32_R;
+         pipeline->col_format_non_compacted = V_028714_SPI_SHADER_32_R;
+      }
    }
 
    if (!ps->info.ps.has_epilog) {
@@ -6224,7 +6266,6 @@ radv_graphics_pipeline_init(struct radv_graphics_pipeline *pipeline, struct radv
       blend.cb_shader_mask &= ps->info.ps.colors_written;
    }
 
-   pipeline->col_format = blend.spi_shader_col_format;
    pipeline->cb_target_mask = blend.cb_target_mask;
 
    if (radv_pipeline_has_stage(pipeline, MESA_SHADER_GEOMETRY) && !radv_pipeline_has_ngg(pipeline)) {

@@ -137,7 +137,7 @@ anv_nir_lower_mesh_ext_instr(nir_builder *b, nir_instr *instr, void *data)
       assert(intrin->src[1].is_ssa);
       uint8_t components = intrin->src[1].ssa->num_components;
 
-      unsigned vertices_per_primitive =
+      ASSERTED unsigned vertices_per_primitive =
             num_mesh_vertices_per_primitive(b->shader->info.mesh.primitive_type);
       assert(vertices_per_primitive == components);
       assert(nir_intrinsic_write_mask(intrin) == (1u << components) - 1);
@@ -227,8 +227,8 @@ anv_shader_stage_to_nir(struct anv_device *device,
          .post_depth_coverage = true,
          .runtime_descriptor_array = true,
          .float_controls = true,
-         .ray_query = pdevice->info.has_ray_tracing,
-         .ray_tracing = pdevice->info.has_ray_tracing,
+         .ray_query = ANV_SUPPORT_RT && pdevice->info.has_ray_tracing,
+         .ray_tracing = ANV_SUPPORT_RT && pdevice->info.has_ray_tracing,
          .shader_clock = true,
          .shader_viewport_index_layer = true,
          .stencil_export = true,
@@ -1975,7 +1975,7 @@ anv_pipeline_compile_cs(struct anv_compute_pipeline *pipeline,
                         struct vk_pipeline_cache *cache,
                         const VkComputePipelineCreateInfo *info)
 {
-   const VkPipelineShaderStageCreateInfo *sinfo = &info->stage;
+   ASSERTED const VkPipelineShaderStageCreateInfo *sinfo = &info->stage;
    assert(sinfo->stage == VK_SHADER_STAGE_COMPUTE_BIT);
 
    VkPipelineCreationFeedback pipeline_feedback = {
@@ -2253,7 +2253,8 @@ anv_graphics_pipeline_init(struct anv_graphics_pipeline *pipeline,
    vk_dynamic_graphics_state_fill(&pipeline->dynamic_state, state);
 
    pipeline->depth_clamp_enable = state->rs->depth_clamp_enable;
-   pipeline->depth_clip_enable = state->rs->depth_clip_enable;
+   pipeline->depth_clip_enable =
+      vk_rasterization_state_depth_clip_enable(state->rs);
    pipeline->view_mask = state->rp->view_mask;
 
    result = anv_graphics_pipeline_compile(pipeline, cache, pCreateInfo, state);
@@ -2297,7 +2298,7 @@ anv_graphics_pipeline_init(struct anv_graphics_pipeline *pipeline,
    }
 
    pipeline->negative_one_to_one =
-      state->vp != NULL && state->vp->negative_one_to_one;
+      state->vp != NULL && state->vp->depth_clip_negative_one_to_one;
 
    /* Store line mode, polygon mode and rasterization samples, these are used
     * for dynamic primitive topology.
@@ -2473,6 +2474,9 @@ compile_upload_rt_shader(struct anv_ray_tracing_pipeline *pipeline,
    /* TODO: Figure out executables for resume shaders */
    anv_pipeline_add_executables(&pipeline->base, stage, bin);
    util_dynarray_append(&pipeline->shaders, struct anv_shader_bin *, bin);
+
+   pipeline->scratch_size =
+      MAX2(pipeline->scratch_size, bin->prog_data->total_scratch);
 
    *shader_out = bin;
 
@@ -2706,6 +2710,8 @@ anv_pipeline_compile_ray_tracing(struct anv_ray_tracing_pipeline *pipeline,
          return vk_error(pipeline, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
 
+      stages[i].nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_8;
+
       anv_pipeline_lower_nir(&pipeline->base, pipeline_ctx, &stages[i],
                              layout, false /* use_primitive_replication */);
 
@@ -2864,6 +2870,8 @@ anv_pipeline_compile_ray_tracing(struct anv_ray_tracing_pipeline *pipeline,
 VkResult
 anv_device_init_rt_shaders(struct anv_device *device)
 {
+   device->bvh_build_method = ANV_BVH_BUILD_METHOD_NEW_SAH;
+
    if (!device->vk.enabled_extensions.KHR_ray_tracing_pipeline)
       return VK_SUCCESS;
 
@@ -2885,7 +2893,7 @@ anv_device_init_rt_shaders(struct anv_device *device)
       nir_shader *trampoline_nir =
          brw_nir_create_raygen_trampoline(device->physical->compiler, tmp_ctx);
 
-      trampoline_nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_8;
+      trampoline_nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_16;
 
       struct anv_pipeline_bind_map bind_map = {
          .surface_count = 0,
@@ -2942,6 +2950,8 @@ anv_device_init_rt_shaders(struct anv_device *device)
       void *tmp_ctx = ralloc_context(NULL);
       nir_shader *trivial_return_nir =
          brw_nir_create_trivial_return_shader(device->physical->compiler, tmp_ctx);
+
+      trivial_return_nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_8;
 
       NIR_PASS_V(trivial_return_nir, brw_nir_lower_rt_intrinsics, device->info);
 
@@ -3042,9 +3052,20 @@ anv_ray_tracing_pipeline_create(
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR);
 
+   uint32_t group_count = pCreateInfo->groupCount;
+   if (pCreateInfo->pLibraryInfo) {
+      for (uint32_t l = 0; l < pCreateInfo->pLibraryInfo->libraryCount; l++) {
+         ANV_FROM_HANDLE(anv_pipeline, library,
+                         pCreateInfo->pLibraryInfo->pLibraries[l]);
+         struct anv_ray_tracing_pipeline *rt_library =
+            anv_pipeline_to_ray_tracing(library);
+         group_count += rt_library->group_count;
+      }
+   }
+
    VK_MULTIALLOC(ma);
    VK_MULTIALLOC_DECL(&ma, struct anv_ray_tracing_pipeline, pipeline, 1);
-   VK_MULTIALLOC_DECL(&ma, struct anv_rt_shader_group, groups, pCreateInfo->groupCount);
+   VK_MULTIALLOC_DECL(&ma, struct anv_rt_shader_group, groups, group_count);
    if (!vk_multialloc_zalloc2(&ma, &device->vk.alloc, pAllocator,
                               VK_SYSTEM_ALLOCATION_SCOPE_DEVICE))
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -3057,7 +3078,7 @@ anv_ray_tracing_pipeline_create(
       return result;
    }
 
-   pipeline->group_count = pCreateInfo->groupCount;
+   pipeline->group_count = group_count;
    pipeline->groups = groups;
 
    ASSERTED const VkShaderStageFlags ray_tracing_stages =
@@ -3112,6 +3133,32 @@ anv_ray_tracing_pipeline_create(
       anv_pipeline_finish(&pipeline->base, device, pAllocator);
       vk_free2(&device->vk.alloc, pAllocator, pipeline);
       return result;
+   }
+
+   /* Compute the size of the scratch BO (for register spilling) by taking the
+    * max of all the shaders in the pipeline.
+    */
+   util_dynarray_foreach(&pipeline->shaders, struct anv_shader_bin *, shader) {
+      pipeline->scratch_size =
+         MAX2(pipeline->scratch_size, (*shader)->prog_data->total_scratch);
+   }
+
+   if (pCreateInfo->pLibraryInfo) {
+      uint32_t g = pCreateInfo->groupCount;
+      for (uint32_t l = 0; l < pCreateInfo->pLibraryInfo->libraryCount; l++) {
+         ANV_FROM_HANDLE(anv_pipeline, library,
+                         pCreateInfo->pLibraryInfo->pLibraries[l]);
+         struct anv_ray_tracing_pipeline *rt_library =
+            anv_pipeline_to_ray_tracing(library);
+         for (uint32_t lg = 0; lg < rt_library->group_count; lg++)
+            pipeline->groups[g++] = rt_library->groups[lg];
+
+         /* Also account for all the pipeline libraries for the size of the
+          * scratch BO.
+          */
+         pipeline->scratch_size =
+            MAX2(pipeline->scratch_size, rt_library->scratch_size);
+      }
    }
 
    anv_genX(device->info, ray_tracing_pipeline_emit)(pipeline);
@@ -3414,6 +3461,7 @@ anv_GetRayTracingShaderGroupHandlesKHR(
    struct anv_ray_tracing_pipeline *rt_pipeline =
       anv_pipeline_to_ray_tracing(pipeline);
 
+   assert(firstGroup + groupCount <= rt_pipeline->group_count);
    for (uint32_t i = 0; i < groupCount; i++) {
       struct anv_rt_shader_group *group = &rt_pipeline->groups[firstGroup + i];
       memcpy(pData, group->handle, sizeof(group->handle));

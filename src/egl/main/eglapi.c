@@ -779,14 +779,9 @@ eglTerminate(EGLDisplay dpy)
       RETURN_EGL_ERROR(NULL, EGL_BAD_DISPLAY, EGL_FALSE);
 
    if (disp->Initialized) {
+      _eglReleaseDisplayResources(disp);
       disp->Driver->Terminate(disp);
-      /* do not reset disp->Driver */
-      disp->ClientAPIsString[0] = 0;
-      disp->Initialized = EGL_FALSE;
-
-      /* Reset blob cache funcs on terminate. */
-      disp->BlobCacheSet = NULL;
-      disp->BlobCacheGet = NULL;
+      _eglCleanupDisplay(disp);
    }
 
    simple_mtx_unlock(&disp->Mutex);
@@ -906,7 +901,7 @@ eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_list,
 
    if (!share && share_list != EGL_NO_CONTEXT)
       RETURN_EGL_ERROR(disp, EGL_BAD_CONTEXT, EGL_NO_CONTEXT);
-   else if(share && share->Resource.Display != disp) {
+   else if (share && share->Resource.Display != disp) {
       /* From the spec.
        *
        * "An EGL_BAD_MATCH error is generated if an OpenGL or OpenGL ES

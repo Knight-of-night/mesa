@@ -261,7 +261,7 @@ handleIQMatrixBuffer(vlVaContext *context, vlVaBuffer *buf)
 }
 
 static void
-handleSliceParameterBuffer(vlVaContext *context, vlVaBuffer *buf, unsigned num)
+handleSliceParameterBuffer(vlVaContext *context, vlVaBuffer *buf, unsigned num_slice_buffers, unsigned num_slices)
 {
    switch (u_reduce_video_profile(context->templat.profile)) {
    case PIPE_VIDEO_FORMAT_MPEG12:
@@ -293,7 +293,7 @@ handleSliceParameterBuffer(vlVaContext *context, vlVaBuffer *buf, unsigned num)
       break;
 
    case PIPE_VIDEO_FORMAT_AV1:
-      vlVaHandleSliceParameterBufferAV1(context, buf, num);
+      vlVaHandleSliceParameterBufferAV1(context, buf, num_slice_buffers, num_slices);
       break;
 
    default:
@@ -695,6 +695,7 @@ vlVaRenderPicture(VADriverContextP ctx, VAContextID context_id, VABufferID *buff
 
    unsigned i;
    unsigned slice_param_idx = 0;
+   unsigned slice_idx = 0;
 
    if (!ctx)
       return VA_STATUS_ERROR_INVALID_CONTEXT;
@@ -735,8 +736,20 @@ vlVaRenderPicture(VADriverContextP ctx, VAContextID context_id, VABufferID *buff
          break;
 
       case VASliceParameterBufferType:
-         handleSliceParameterBuffer(context, buf, slice_param_idx++);
-         break;
+      {
+         /* Some apps like gstreamer send all the slices at once
+            and some others send individual VASliceParameterBufferType buffers
+
+            slice_param_idx is the zero based count of VASliceParameterBufferType
+               (including multiple buffers with num_elements > 1) received
+               before this call to handleSliceParameterBuffer
+
+            slice_idx is the zero based number of total slices received
+               before this call to handleSliceParameterBuffer
+         */
+         handleSliceParameterBuffer(context, buf, slice_param_idx++, slice_idx);
+         slice_idx += buf->num_elements;
+      } break;
 
       case VASliceDataBufferType:
          vaStatus = handleVASliceDataBufferType(context, buf);
@@ -846,14 +859,36 @@ vlVaEndPicture(VADriverContextP ctx, VAContextID context_id)
       realloc = true;
    }
 
-   if (u_reduce_video_profile(context->templat.profile) == PIPE_VIDEO_FORMAT_JPEG &&
-       surf->buffer->buffer_format == PIPE_FORMAT_NV12) {
-      if (context->mjpeg.sampling_factor == 0x211111 ||
-          context->mjpeg.sampling_factor == 0x221212) {
-         surf->templat.buffer_format = PIPE_FORMAT_YUYV;
+   if (u_reduce_video_profile(context->templat.profile) == PIPE_VIDEO_FORMAT_JPEG) {
+      if (surf->buffer->buffer_format == PIPE_FORMAT_NV12 &&
+          context->mjpeg.sampling_factor != MJPEG_SAMPLING_FACTOR_NV12) {
+         /* workaround to reallocate surface buffer with right format
+          * if it doesnt match with sampling_factor. ffmpeg doesnt
+          * use VASurfaceAttribPixelFormat and defaults to NV12.
+          */
+         switch (context->mjpeg.sampling_factor) {
+            case MJPEG_SAMPLING_FACTOR_YUV422:
+            case MJPEG_SAMPLING_FACTOR_YUY2:
+               surf->templat.buffer_format = PIPE_FORMAT_YUYV;
+               break;
+            case MJPEG_SAMPLING_FACTOR_YUV444:
+               surf->templat.buffer_format = PIPE_FORMAT_Y8_U8_V8_444_UNORM;
+               break;
+            case MJPEG_SAMPLING_FACTOR_YUV400:
+               surf->templat.buffer_format = PIPE_FORMAT_Y8_400_UNORM;
+               break;
+            default:
+               mtx_unlock(&drv->mutex);
+               return VA_STATUS_ERROR_INVALID_SURFACE;
+         }
          realloc = true;
-      } else if (context->mjpeg.sampling_factor != 0x221111) {
-         /* Not NV12 either */
+      }
+      /* check if format is supported before proceeding with realloc,
+       * also avoid submission if hardware doesnt support the format and
+       * applcation failed to check the supported rt_formats.
+       */
+      if (!screen->is_video_format_supported(screen, surf->templat.buffer_format,
+          PIPE_VIDEO_PROFILE_JPEG_BASELINE, PIPE_VIDEO_ENTRYPOINT_BITSTREAM)) {
          mtx_unlock(&drv->mutex);
          return VA_STATUS_ERROR_INVALID_SURFACE;
       }

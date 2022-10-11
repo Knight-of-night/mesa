@@ -38,7 +38,6 @@ apt-get install -y --no-remove \
         kmod \
         libclang-13-dev \
         libclang-11-dev \
-        libclc-dev \
         libelf-dev \
         libepoxy-dev \
         libexpat1-dev \
@@ -65,6 +64,7 @@ apt-get install -y --no-remove \
         pkg-config \
         python3-mako \
         python3-pil \
+        python3-ply \
         python3-requests \
         qemu-user \
         valgrind \

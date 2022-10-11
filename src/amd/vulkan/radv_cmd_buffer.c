@@ -1268,7 +1268,7 @@ radv_emit_rbplus_state(struct radv_cmd_buffer *cmd_buffer)
                      ? !G_028C74_FORCE_DST_ALPHA_1_GFX11(cb->cb_color_attrib)
                      : !G_028C74_FORCE_DST_ALPHA_1_GFX6(cb->cb_color_attrib);
 
-      uint32_t spi_format = (pipeline->col_format >> (i * 4)) & 0xf;
+      uint32_t spi_format = (pipeline->col_format_non_compacted >> (i * 4)) & 0xf;
       uint32_t colormask = (pipeline->cb_target_mask >> (i * 4)) & 0xf;
 
       if (format == V_028C70_COLOR_8 || format == V_028C70_COLOR_16 || format == V_028C70_COLOR_32)
@@ -1517,6 +1517,22 @@ radv_emit_graphics_pipeline(struct radv_cmd_buffer *cmd_buffer)
    radv_emit_ps_epilog(cmd_buffer);
 
    radv_cs_add_buffer(cmd_buffer->device->ws, cmd_buffer->cs, pipeline->base.slab_bo);
+
+   /* With graphics pipeline library, binaries are uploaded from a library and they hold a pointer
+    * to the slab BO.
+    */
+   for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; s++) {
+      struct radv_shader *shader = pipeline->base.shaders[s];
+
+      if (!shader || !shader->bo)
+         continue;
+
+      radv_cs_add_buffer(cmd_buffer->device->ws, cmd_buffer->cs, shader->bo);
+   }
+
+   if (pipeline->base.gs_copy_shader && pipeline->base.gs_copy_shader->bo) {
+      radv_cs_add_buffer(cmd_buffer->device->ws, cmd_buffer->cs, pipeline->base.gs_copy_shader->bo);
+   }
 
    if (unlikely(cmd_buffer->device->trace_bo))
       radv_save_pipeline(cmd_buffer, &pipeline->base);
@@ -5146,15 +5162,14 @@ radv_CmdBindPipeline(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipeline
       break;
    }
    case VK_PIPELINE_BIND_POINT_GRAPHICS: {
-      struct radv_graphics_pipeline *graphics_pipeline =
-         pipeline ? radv_pipeline_to_graphics(pipeline) : NULL;
+      struct radv_graphics_pipeline *graphics_pipeline = radv_pipeline_to_graphics(pipeline);
 
       if (cmd_buffer->state.graphics_pipeline == graphics_pipeline)
          return;
       radv_mark_descriptor_sets_dirty(cmd_buffer, pipelineBindPoint);
 
       bool vtx_emit_count_changed =
-         !pipeline || !cmd_buffer->state.graphics_pipeline ||
+         !cmd_buffer->state.graphics_pipeline ||
          cmd_buffer->state.graphics_pipeline->vtx_emit_num != graphics_pipeline->vtx_emit_num ||
          cmd_buffer->state.graphics_pipeline->vtx_base_sgpr != graphics_pipeline->vtx_base_sgpr;
       cmd_buffer->state.graphics_pipeline = graphics_pipeline;

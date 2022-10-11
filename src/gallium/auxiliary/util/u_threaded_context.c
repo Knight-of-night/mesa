@@ -32,6 +32,7 @@
 #include "util/u_upload_mgr.h"
 #include "driver_trace/tr_context.h"
 #include "util/log.h"
+#include "util/perf/cpu_trace.h"
 #include "compiler/shader_info.h"
 
 #if TC_DEBUG >= 1
@@ -59,12 +60,18 @@ enum tc_call_id {
    TC_NUM_CALLS,
 };
 
-#if TC_DEBUG >= 3
+#if TC_DEBUG >= 3 || defined(TC_TRACE)
 static const char *tc_call_names[] = {
 #define CALL(name) #name,
 #include "u_threaded_context_calls.h"
 #undef CALL
 };
+#endif
+
+#ifdef TC_TRACE
+#  define TC_TRACE_SCOPE(call_id) MESA_TRACE_SCOPE(tc_call_names[call_id])
+#else
+#  define TC_TRACE_SCOPE(call_id)
 #endif
 
 typedef uint16_t (*tc_execute)(struct pipe_context *pipe, void *call, uint64_t *last);
@@ -208,6 +215,8 @@ tc_batch_execute(void *job, UNUSED void *gdata, int thread_index)
       tc_printf("CALL: %s", tc_call_names[call->call_id]);
 #endif
 
+      TC_TRACE_SCOPE(call->call_id);
+
       iter += execute_func[call->call_id](pipe, call, last);
    }
 
@@ -288,6 +297,7 @@ static void *
 tc_add_sized_call(struct threaded_context *tc, enum tc_call_id id,
                   unsigned num_slots)
 {
+   TC_TRACE_SCOPE(id);
    struct tc_batch *next = &tc->batch_slots[tc->next];
    assert(num_slots <= TC_SLOTS_PER_BATCH);
    tc_debug_check(tc);
@@ -392,6 +402,8 @@ _tc_sync(struct threaded_context *tc, UNUSED const char *info, UNUSED const char
    struct tc_batch *next = &tc->batch_slots[tc->next];
    bool synced = false;
 
+   MESA_TRACE_BEGIN(func);
+
    tc_debug_check(tc);
 
    /* Only wait for queued calls... */
@@ -421,10 +433,12 @@ _tc_sync(struct threaded_context *tc, UNUSED const char *info, UNUSED const char
 
       if (tc_strcmp(func, "tc_destroy") != 0) {
          tc_printf("sync %s %s", func, info);
-	  }
+      }
    }
 
    tc_debug_check(tc);
+
+   MESA_TRACE_END();
 }
 
 #define tc_sync(tc) _tc_sync(tc, "", __func__)
@@ -2282,8 +2296,30 @@ tc_buffer_map(struct pipe_context *_pipe,
       /* We can't let resource_copy_region disable the CPU storage. */
       assert(!(tres->b.flags & PIPE_RESOURCE_FLAG_DONT_MAP_DIRECTLY));
 
-      if (!tres->cpu_storage)
+      if (!tres->cpu_storage) {
          tres->cpu_storage = align_malloc(resource->width0, tc->map_buffer_alignment);
+
+         if (tres->cpu_storage && tres->valid_buffer_range.end) {
+            /* The GPU buffer contains valid data. Copy them to the CPU storage. */
+            struct pipe_box box2;
+            struct pipe_transfer *transfer2;
+
+            unsigned valid_range_len = tres->valid_buffer_range.end - tres->valid_buffer_range.start;
+            u_box_1d(tres->valid_buffer_range.start, valid_range_len, &box2);
+
+            tc_sync_msg(tc, "cpu storage GPU -> CPU copy");
+            tc_set_driver_thread(tc);
+
+            void *ret = pipe->buffer_map(pipe, tres->latest ? tres->latest : resource,
+                                         0, PIPE_MAP_READ, &box2, &transfer2);
+            memcpy(&((uint8_t*)tres->cpu_storage)[tres->valid_buffer_range.start],
+                   ret,
+                   valid_range_len);
+            pipe->buffer_unmap(pipe, transfer2);
+
+            tc_clear_driver_thread(tc);
+         }
+      }
 
       if (tres->cpu_storage) {
          struct threaded_transfer *ttrans = slab_zalloc(&tc->pool_transfers);
@@ -2708,6 +2744,12 @@ tc_buffer_subdata(struct pipe_context *_pipe,
       uint8_t *map = NULL;
 
       u_box_1d(offset, size, &box);
+
+      /* CPU storage is only useful for partial updates. It can add overhead
+       * on glBufferData calls so avoid using it.
+       */
+      if (!tres->cpu_storage && offset == 0 && size == resource->width0)
+         usage |= TC_TRANSFER_MAP_UPLOAD_CPU_STORAGE;
 
       map = tc_buffer_map(_pipe, resource, 0, usage, &box, &transfer);
       if (map) {

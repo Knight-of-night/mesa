@@ -364,6 +364,7 @@ struct radv_instance {
    bool zero_vram;
    bool disable_sinking_load_input_fs;
    bool flush_before_query_copy;
+   bool enable_unified_heap_on_apu;
 };
 
 VkResult radv_init_wsi(struct radv_physical_device *physical_device);
@@ -2033,7 +2034,7 @@ struct radv_graphics_pipeline {
    struct radv_userdata_info *last_vgt_api_stage_locs;
 
    /* Used for rbplus */
-   uint32_t col_format;
+   uint32_t col_format_non_compacted;
    uint32_t cb_target_mask;
 
    bool disable_out_of_order_rast_for_occlusion;

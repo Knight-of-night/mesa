@@ -83,7 +83,6 @@ if with_tools.contains('all')
     'lima',
     'nir',
     'nouveau',
-    'xvmc',
     'asahi',
     'imagination',
   ]
@@ -283,6 +282,11 @@ with_imagination_srv = get_option('imagination-srv')
 with_microsoft_vk = _vulkan_drivers.contains('microsoft-experimental')
 with_any_vk = _vulkan_drivers.length() != 0
 
+_vulkan_rt_drivers = get_option('vulkan-rt-drivers')
+if _vulkan_rt_drivers.contains('intel')
+  error('Use -Dintel-clc=enabled to enable Intel Vulkan Ray Tracing')
+endif
+
 with_any_broadcom = with_gallium_vc4 or with_gallium_v3d or with_broadcom_vk
 with_any_intel = with_intel_vk or with_intel_hasvk or with_gallium_iris or with_gallium_crocus or with_intel_tools
 
@@ -298,6 +302,7 @@ endif
 
 with_microsoft_clc = get_option('microsoft-clc').enabled()
 with_intel_clc = get_option('intel-clc').enabled()
+with_intel_vk_rt = with_intel_clc
 with_clc = with_microsoft_clc or with_intel_clc
 with_libclc = with_clc
 with_spirv_to_dxil = get_option('spirv-to-dxil')
@@ -689,47 +694,7 @@ if with_vulkan_overlay_layer or with_aco_tests or with_amd_vk
   endif
 endif
 
-_xvmc = get_option('gallium-xvmc')
-if _xvmc == 'true'
-  _xvmc = 'enabled'
-  warning('gallium-xvmc option "true" deprecated, please use "enabled" instead.')
-elif _xvmc == 'false'
-  _xvmc = 'disabled'
-  warning('gallium-xvmc option "false" deprecated, please use "disabled" instead.')
-endif
-if not system_has_kms_drm
-  if _xvmc == 'enabled'
-    error('XVMC state tracker can only be build on unix-like OSes.')
-  else
-    _xvmc = 'disabled'
-  endif
-elif not with_platform_x11
-  if _xvmc == 'enabled'
-    error('XVMC state tracker requires X11 support.')
-  else
-    _xvmc = 'disabled'
-  endif
-elif not (with_gallium_r600 or with_gallium_nouveau)
-  if _xvmc == 'enabled'
-    error('XVMC state tracker requires at least one of the following gallium drivers: r600, nouveau.')
-  else
-    _xvmc = 'disabled'
-  endif
-endif
-dep_xvmc = null_dep
 dep_xv = null_dep
-with_gallium_xvmc = false
-if _xvmc != 'disabled'
-  dep_xvmc = dependency('xvmc', version : '>= 1.0.6', required : _xvmc == 'enabled')
-  dep_xv = dependency('xv', required : _xvmc == 'enabled')
-  with_gallium_xvmc = dep_xvmc.found() and dep_xv.found()
-endif
-
-xvmc_drivers_path = get_option('xvmc-libs-path')
-if xvmc_drivers_path == ''
-  xvmc_drivers_path = get_option('libdir')
-endif
-
 _omx = get_option('gallium-omx')
 if not system_has_kms_drm
   if ['auto', 'disabled'].contains(_omx)
@@ -1771,7 +1736,9 @@ if draw_with_llvm
   llvm_modules += 'native'
 endif
 
-if with_amd_vk or with_gallium_radeonsi or with_gallium_opencl
+if with_intel_clc
+  _llvm_version = '>= 13.0.0'
+elif with_amd_vk or with_gallium_radeonsi or with_gallium_opencl
   _llvm_version = '>= 11.0.0'
 elif with_clc
   _llvm_version = '>= 10.0.0'
@@ -1888,12 +1855,18 @@ if with_opencl_spirv
 
   # Require an SPIRV-LLVM-Translator version compatible with the chosen LLVM
   # one.
+
+  # This first version check is still needed as maybe LLVM 8.0 was picked but
+  # we do not want to accept SPIRV-LLVM-Translator 8.0.0.1 as that version
+  # does not have the required API and those are only available starting from
+  # 8.0.1.3.
+  _llvmspirvlib_min_version = '>= 8.0.1.3'
+  if with_intel_clc
+    _llvmspirvlib_min_version = '>= 13.0.0.0'
+  endif
+
   _llvmspirvlib_version = [
-    # This first version check is still needed as maybe LLVM 8.0 was picked but
-    # we do not want to accept SPIRV-LLVM-Translator 8.0.0.1 as that version does
-    # not have the required API and those are only available starting from
-    # 8.0.1.3.
-    '>= 8.0.1.3',
+    _llvmspirvlib_min_version,
     '>= @0@.@1@'.format(chosen_llvm_version_major, chosen_llvm_version_minor),
     '< @0@.@1@'.format(chosen_llvm_version_major, chosen_llvm_version_minor + 1) ]
 
@@ -1911,7 +1884,7 @@ if with_clc
 
   dep_clang = cpp.find_library('clang-cpp', dirs : llvm_libdir, required : false)
 
-  if not dep_clang.found()
+  if not dep_clang.found() or not _shared_llvm
     clang_modules = [
       'clangBasic', 'clangAST', 'clangCodeGen', 'clangLex',
       'clangDriver', 'clangFrontend', 'clangFrontendTool',
@@ -2138,7 +2111,7 @@ if with_platform_x11
     dep_xcb_shm = dependency('xcb-shm')
   endif
   if (with_any_vk or with_glx == 'dri' or with_egl or
-       (with_gallium_vdpau or with_gallium_xvmc or with_gallium_va or
+       (with_gallium_vdpau or with_gallium_va or
         with_gallium_omx != 'disabled'))
     dep_xcb = dependency('xcb')
     dep_x11_xcb = dependency('x11-xcb')
@@ -2175,7 +2148,7 @@ if with_platform_x11
   endif
   if (with_egl or
       with_dri3 or (
-      with_gallium_vdpau or with_gallium_xvmc or with_gallium_xa or
+      with_gallium_vdpau or with_gallium_xa or
       with_gallium_omx != 'disabled'))
     dep_xcb_xfixes = dependency('xcb-xfixes')
   endif
@@ -2393,9 +2366,6 @@ if with_gallium
   gallium_st = ['mesa']
   if with_gallium_xa
     gallium_st += 'xa'
-  endif
-  if with_gallium_xvmc
-    gallium_st += 'xvmc'
   endif
   if with_gallium_vdpau
     gallium_st += 'vdpau'

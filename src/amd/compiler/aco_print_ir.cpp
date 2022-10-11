@@ -111,6 +111,8 @@ print_physReg(PhysReg reg, unsigned bytes, FILE* output, unsigned flags)
       fprintf(output, "scc");
    } else if (reg == 126) {
       fprintf(output, "exec");
+   } else if (reg == 125) {
+      fprintf(output, "null");
    } else {
       bool is_vgpr = reg / 256;
       unsigned r = reg % 256;
@@ -275,7 +277,7 @@ print_sync(memory_sync_info sync, FILE* output)
 }
 
 static void
-print_instr_format_specific(const Instruction* instr, FILE* output)
+print_instr_format_specific(enum amd_gfx_level gfx_level, const Instruction* instr, FILE* output)
 {
    switch (instr->format) {
    case Format::SOPK: {
@@ -287,15 +289,37 @@ print_instr_format_specific(const Instruction* instr, FILE* output)
       uint16_t imm = instr->sopp().imm;
       switch (instr->opcode) {
       case aco_opcode::s_waitcnt: {
-         /* we usually should check the gfx level for vmcnt/lgkm, but
-          * insert_waitcnt() should fill it in regardless. */
-         unsigned vmcnt = (imm & 0xF) | ((imm & (0x3 << 14)) >> 10);
-         if (vmcnt != 63)
-            fprintf(output, " vmcnt(%d)", vmcnt);
-         if (((imm >> 4) & 0x7) < 0x7)
-            fprintf(output, " expcnt(%d)", (imm >> 4) & 0x7);
-         if (((imm >> 8) & 0x3F) < 0x3F)
-            fprintf(output, " lgkmcnt(%d)", (imm >> 8) & 0x3F);
+         wait_imm unpacked(gfx_level, imm);
+         if (unpacked.vm != wait_imm::unset_counter)
+            fprintf(output, " vmcnt(%d)", unpacked.vm);
+         if (unpacked.exp != wait_imm::unset_counter)
+            fprintf(output, " expcnt(%d)", unpacked.exp);
+         if (unpacked.lgkm != wait_imm::unset_counter)
+            fprintf(output, " lgkmcnt(%d)", unpacked.lgkm);
+         break;
+      }
+      case aco_opcode::s_waitcnt_depctr: {
+         unsigned va_vdst = (imm >> 12) & 0xf;
+         unsigned va_sdst = (imm >> 9) & 0x7;
+         unsigned va_ssrc = (imm >> 8) & 0x1;
+         unsigned hold_cnt = (imm >> 7) & 0x1;
+         unsigned vm_vsrc = (imm >> 2) & 0x7;
+         unsigned va_vcc = (imm >> 1) & 0x1;
+         unsigned sa_sdst = imm & 0x1;
+         if (va_vdst != 0xf)
+            fprintf(output, " va_vdst(%d)", va_vdst);
+         if (va_sdst != 0x7)
+            fprintf(output, " va_sdst(%d)", va_sdst);
+         if (va_ssrc != 0x1)
+            fprintf(output, " va_ssrc(%d)", va_ssrc);
+         if (hold_cnt != 0x1)
+            fprintf(output, " holt_cnt(%d)", hold_cnt);
+         if (vm_vsrc != 0x7)
+            fprintf(output, " vm_vsrc(%d)", vm_vsrc);
+         if (va_vcc != 0x1)
+            fprintf(output, " va_vcc(%d)", va_vcc);
+         if (sa_sdst != 0x1)
+            fprintf(output, " sa_sdst(%d)", sa_sdst);
          break;
       }
       case aco_opcode::s_endpgm:
@@ -309,16 +333,25 @@ print_instr_format_specific(const Instruction* instr, FILE* output)
          break;
       }
       case aco_opcode::s_sendmsg: {
-         unsigned id = imm & sendmsg_id_mask;
+         unsigned id =
+            gfx_level >= GFX11 ? (imm & sendmsg_id_mask_gfx11) : (imm & sendmsg_id_mask_gfx6);
+         static_assert(_sendmsg_gs == sendmsg_hs_tessfactor);
+         static_assert(_sendmsg_gs_done == sendmsg_dealloc_vgprs);
          switch (id) {
          case sendmsg_none: fprintf(output, " sendmsg(MSG_NONE)"); break;
          case _sendmsg_gs:
-            fprintf(output, " sendmsg(gs%s%s, %u)", imm & 0x10 ? ", cut" : "",
-                    imm & 0x20 ? ", emit" : "", imm >> 8);
+            if (gfx_level >= GFX11)
+               fprintf(output, " sendmsg(hs_tessfactor)");
+            else
+               fprintf(output, " sendmsg(gs%s%s, %u)", imm & 0x10 ? ", cut" : "",
+                       imm & 0x20 ? ", emit" : "", imm >> 8);
             break;
          case _sendmsg_gs_done:
-            fprintf(output, " sendmsg(gs_done%s%s, %u)", imm & 0x10 ? ", cut" : "",
-                    imm & 0x20 ? ", emit" : "", imm >> 8);
+            if (gfx_level >= GFX11)
+               fprintf(output, " sendmsg(dealloc_vgprs)");
+            else
+               fprintf(output, " sendmsg(gs_done%s%s, %u)", imm & 0x10 ? ", cut" : "",
+                       imm & 0x20 ? ", emit" : "", imm >> 8);
             break;
          case sendmsg_save_wave: fprintf(output, " sendmsg(save_wave)"); break;
          case sendmsg_stall_wave_gen: fprintf(output, " sendmsg(stall_wave_gen)"); break;
@@ -326,6 +359,15 @@ print_instr_format_specific(const Instruction* instr, FILE* output)
          case sendmsg_ordered_ps_done: fprintf(output, " sendmsg(ordered_ps_done)"); break;
          case sendmsg_early_prim_dealloc: fprintf(output, " sendmsg(early_prim_dealloc)"); break;
          case sendmsg_gs_alloc_req: fprintf(output, " sendmsg(gs_alloc_req)"); break;
+         case sendmsg_get_doorbell: fprintf(output, " sendmsg(get_doorbell)"); break;
+         case sendmsg_get_ddid: fprintf(output, " sendmsg(get_ddid)"); break;
+         case sendmsg_rtn_get_doorbell: fprintf(output, " sendmsg(rtn_get_doorbell)"); break;
+         case sendmsg_rtn_get_ddid: fprintf(output, " sendmsg(rtn_get_ddid)"); break;
+         case sendmsg_rtn_get_tma: fprintf(output, " sendmsg(rtn_get_Tma)"); break;
+         case sendmsg_rtn_get_realtime: fprintf(output, " sendmsg(rtn_get_realtime)"); break;
+         case sendmsg_rtn_save_wave: fprintf(output, " sendmsg(rtn_save_wave)"); break;
+         case sendmsg_rtn_get_tba: fprintf(output, " sendmsg(rtn_get_Tba)"); break;
+         default: fprintf(output, " imm:%u", imm);
          }
          break;
       }
@@ -674,7 +716,8 @@ print_instr_format_specific(const Instruction* instr, FILE* output)
 }
 
 void
-aco_print_instr(const Instruction* instr, FILE* output, unsigned flags)
+aco_print_instr(enum amd_gfx_level gfx_level, const Instruction* instr, FILE* output,
+                unsigned flags)
 {
    if (!instr->definitions.empty()) {
       for (unsigned i = 0; i < instr->definitions.size(); ++i) {
@@ -771,7 +814,7 @@ aco_print_instr(const Instruction* instr, FILE* output, unsigned flags)
          }
       }
    }
-   print_instr_format_specific(instr, output);
+   print_instr_format_specific(gfx_level, instr, output);
 }
 
 static void
@@ -857,7 +900,8 @@ print_stage(Stage stage, FILE* output)
 }
 
 void
-aco_print_block(const Block* block, FILE* output, unsigned flags, const live& live_vars)
+aco_print_block(enum amd_gfx_level gfx_level, const Block* block, FILE* output, unsigned flags,
+                const live& live_vars)
 {
    fprintf(output, "BB%d\n", block->index);
    fprintf(output, "/* logical preds: ");
@@ -890,7 +934,7 @@ aco_print_block(const Block* block, FILE* output, unsigned flags, const live& li
       if (flags & print_perf_info)
          fprintf(output, "(%3u clk)   ", instr->pass_flags);
 
-      aco_print_instr(instr.get(), output, flags);
+      aco_print_instr(gfx_level, instr.get(), output, flags);
       fprintf(output, "\n");
       index++;
    }
@@ -911,7 +955,7 @@ aco_print_program(const Program* program, FILE* output, const live& live_vars, u
    print_stage(program->stage, output);
 
    for (Block const& block : program->blocks)
-      aco_print_block(&block, output, flags, live_vars);
+      aco_print_block(program->gfx_level, &block, output, flags, live_vars);
 
    if (program->constant_data.size()) {
       fprintf(output, "\n/* constant data */\n");

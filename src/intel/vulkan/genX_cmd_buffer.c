@@ -5096,8 +5096,9 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
             cmd_buffer->state.samplers[MESA_SHADER_COMPUTE].offset,
          .BindingTablePointer =
             cmd_buffer->state.binding_tables[MESA_SHADER_COMPUTE].offset,
-         .BindingTableEntryCount =
-            1 + MIN2(pipeline->cs->bind_map.surface_count, 30),
+         /* Typically set to 0 to avoid prefetching on every thread dispatch. */
+         .BindingTableEntryCount = devinfo->verx10 == 125 ?
+            0 : 1 + MIN2(pipeline->cs->bind_map.surface_count, 30),
          .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
          .SharedLocalMemorySize = encode_slm_size(GFX_VER,
                                                   prog_data->base.total_shared),
@@ -5306,6 +5307,131 @@ genX(cmd_buffer_ray_query_globals)(struct anv_cmd_buffer *cmd_buffer)
 }
 
 #if GFX_VERx10 >= 125
+void
+genX(cmd_buffer_dispatch_kernel)(struct anv_cmd_buffer *cmd_buffer,
+                                 struct anv_kernel *kernel,
+                                 const uint32_t *global_size,
+                                 uint32_t arg_count,
+                                 const struct anv_kernel_arg *args)
+{
+   const struct intel_device_info *devinfo = cmd_buffer->device->info;
+   const struct brw_cs_prog_data *cs_prog_data =
+      brw_cs_prog_data_const(kernel->bin->prog_data);
+
+   genX(cmd_buffer_config_l3)(cmd_buffer, kernel->l3_config);
+
+   if (is_render_queue_cmd_buffer(cmd_buffer))
+      genX(flush_pipeline_select_gpgpu)(cmd_buffer);
+
+   /* Apply any pending pipeline flushes we may have.  We want to apply them
+    * now because, if any of those flushes are for things like push constants,
+    * the GPU will read the state at weird times.
+    */
+   genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+
+   uint32_t indirect_data_size = sizeof(struct brw_kernel_sysvals);
+   indirect_data_size += kernel->bin->bind_map.kernel_args_size;
+   indirect_data_size = ALIGN(indirect_data_size, 64);
+   struct anv_state indirect_data =
+      anv_state_stream_alloc(&cmd_buffer->general_state_stream,
+                             indirect_data_size, 64);
+   memset(indirect_data.map, 0, indirect_data.alloc_size);
+
+   struct brw_kernel_sysvals sysvals = {};
+   if (global_size != NULL) {
+      for (unsigned i = 0; i < 3; i++)
+         sysvals.num_work_groups[i] = global_size[i];
+   } else {
+      struct mi_builder b;
+      mi_builder_init(&b, cmd_buffer->device->info, &cmd_buffer->batch);
+
+      struct anv_address sysvals_addr = {
+         .bo = NULL, /* General state buffer is always 0. */
+         .offset = indirect_data.offset,
+      };
+
+      mi_store(&b, mi_mem32(anv_address_add(sysvals_addr, 0)),
+                   mi_reg32(GPGPU_DISPATCHDIMX));
+      mi_store(&b, mi_mem32(anv_address_add(sysvals_addr, 4)),
+                   mi_reg32(GPGPU_DISPATCHDIMY));
+      mi_store(&b, mi_mem32(anv_address_add(sysvals_addr, 8)),
+                   mi_reg32(GPGPU_DISPATCHDIMZ));
+   }
+
+   memcpy(indirect_data.map, &sysvals, sizeof(sysvals));
+
+   void *args_map = indirect_data.map + sizeof(sysvals);
+   for (unsigned i = 0; i < kernel->bin->bind_map.kernel_arg_count; i++) {
+      struct brw_kernel_arg_desc *arg_desc =
+         &kernel->bin->bind_map.kernel_args[i];
+      assert(i < arg_count);
+      const struct anv_kernel_arg *arg = &args[i];
+      if (arg->is_ptr) {
+         memcpy(args_map + arg_desc->offset, arg->ptr, arg_desc->size);
+      } else {
+         assert(arg_desc->size <= sizeof(arg->u64));
+         memcpy(args_map + arg_desc->offset, &arg->u64, arg_desc->size);
+      }
+   }
+
+   struct brw_cs_dispatch_info dispatch =
+      brw_cs_get_dispatch_info(devinfo, cs_prog_data, NULL);
+
+   anv_batch_emit(&cmd_buffer->batch, GENX(CFE_STATE), cfe) {
+      const uint32_t subslices = MAX2(devinfo->subslice_total, 1);
+      cfe.MaximumNumberofThreads =
+         devinfo->max_cs_threads * subslices - 1;
+
+      if (cs_prog_data->base.total_scratch > 0) {
+         struct anv_bo *scratch_bo =
+            anv_scratch_pool_alloc(cmd_buffer->device,
+                                   &cmd_buffer->device->scratch_pool,
+                                   MESA_SHADER_COMPUTE,
+                                   cs_prog_data->base.total_scratch);
+         anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
+                               cmd_buffer->batch.alloc,
+                               scratch_bo);
+         uint32_t scratch_surf =
+            anv_scratch_pool_get_surf(cmd_buffer->device,
+                                      &cmd_buffer->device->scratch_pool,
+                                      cs_prog_data->base.total_scratch);
+         cfe.ScratchSpaceBuffer = scratch_surf >> 4;
+      }
+   }
+
+   anv_batch_emit(&cmd_buffer->batch, GENX(COMPUTE_WALKER), cw) {
+      cw.PredicateEnable                = false;
+      cw.SIMDSize                       = dispatch.simd_size / 16;
+      cw.IndirectDataStartAddress       = indirect_data.offset;
+      cw.IndirectDataLength             = indirect_data.alloc_size;
+      cw.LocalXMaximum                  = cs_prog_data->local_size[0] - 1;
+      cw.LocalYMaximum                  = cs_prog_data->local_size[1] - 1;
+      cw.LocalZMaximum                  = cs_prog_data->local_size[2] - 1;
+      cw.ExecutionMask                  = dispatch.right_mask;
+      cw.PostSync.MOCS                  = cmd_buffer->device->isl_dev.mocs.internal;
+
+      if (global_size != NULL) {
+         cw.ThreadGroupIDXDimension     = global_size[0];
+         cw.ThreadGroupIDYDimension     = global_size[1];
+         cw.ThreadGroupIDZDimension     = global_size[2];
+      } else {
+         cw.IndirectParameterEnable     = true;
+      }
+
+      struct GENX(INTERFACE_DESCRIPTOR_DATA) idd = {
+         .KernelStartPointer = kernel->bin->kernel.offset,
+         .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
+         .SharedLocalMemorySize =
+            encode_slm_size(GFX_VER, cs_prog_data->base.total_shared),
+         .NumberOfBarriers = cs_prog_data->uses_barrier,
+      };
+      cw.InterfaceDescriptor = idd;
+   }
+
+   /* We just blew away the compute pipeline state */
+   cmd_buffer->state.compute.pipeline_dirty = true;
+}
+
 static void
 calc_local_trace_size(uint8_t local_shift[3], const uint32_t global[3])
 {
@@ -5353,6 +5479,7 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
                       uint32_t launch_depth,
                       uint64_t launch_size_addr)
 {
+   struct anv_device *device = cmd_buffer->device;
    struct anv_cmd_ray_tracing_state *rt = &cmd_buffer->state.rt;
    struct anv_ray_tracing_pipeline *pipeline = rt->pipeline;
 
@@ -5379,6 +5506,9 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
    anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
                          cmd_buffer->batch.alloc,
                          rt->scratch.bo);
+   anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
+                         cmd_buffer->batch.alloc,
+                         cmd_buffer->device->btd_fifo_bo);
 
    /* Allocate and set up our RT_DISPATCH_GLOBALS */
    struct anv_state rtdg_state =
@@ -5485,10 +5615,44 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
       }
    }
 
+   anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_BTD), btd) {
+      /* TODO: This is the timeout after which the bucketed thread dispatcher
+       *       will kick off a wave of threads. We go with the lowest value
+       *       for now. It could be tweaked on a per application basis
+       *       (drirc).
+       */
+      btd.DispatchTimeoutCounter = _64clocks;
+      /* BSpec 43851: "This field must be programmed to 6h i.e. memory backed
+       *               buffer must be 128KB."
+       */
+      btd.PerDSSMemoryBackedBufferSize = 6;
+      btd.MemoryBackedBufferBasePointer = (struct anv_address) { .bo = device->btd_fifo_bo };
+      if (pipeline->scratch_size > 0) {
+         struct anv_bo *scratch_bo =
+            anv_scratch_pool_alloc(device,
+                                   &device->scratch_pool,
+                                   MESA_SHADER_COMPUTE,
+                                   pipeline->scratch_size);
+         anv_reloc_list_add_bo(cmd_buffer->batch.relocs,
+                               cmd_buffer->batch.alloc,
+                               scratch_bo);
+         uint32_t scratch_surf =
+            anv_scratch_pool_get_surf(cmd_buffer->device,
+                                      &device->scratch_pool,
+                                      pipeline->scratch_size);
+         btd.ScratchSpaceBuffer = scratch_surf >> 4;
+      }
+   }
+
+   const struct brw_cs_prog_data *cs_prog_data =
+      brw_cs_prog_data_const(device->rt_trampoline->prog_data);
+   struct brw_cs_dispatch_info dispatch =
+      brw_cs_get_dispatch_info(device->info, cs_prog_data, NULL);
+
    anv_batch_emit(&cmd_buffer->batch, GENX(COMPUTE_WALKER), cw) {
       cw.IndirectParameterEnable        = is_indirect;
       cw.PredicateEnable                = false;
-      cw.SIMDSize                       = SIMD8;
+      cw.SIMDSize                       = dispatch.simd_size / 16;
       cw.LocalXMaximum                  = (1 << local_size_log2[0]) - 1;
       cw.LocalYMaximum                  = (1 << local_size_log2[1]) - 1;
       cw.LocalZMaximum                  = (1 << local_size_log2[2]) - 1;

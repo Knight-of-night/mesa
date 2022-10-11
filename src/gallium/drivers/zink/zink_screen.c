@@ -77,6 +77,7 @@ zink_debug_options[] = {
    { "sync", ZINK_DEBUG_SYNC, "Force synchronization before draws/dispatches" },
    { "compact", ZINK_DEBUG_COMPACT, "Use only 4 descriptor sets" },
    { "noreorder", ZINK_DEBUG_NOREORDER, "Do not reorder command streams" },
+   { "gpl", ZINK_DEBUG_GPL, "Force using Graphics Pipeline Library for all shaders" },
    DEBUG_NAMED_VALUE_END
 };
 
@@ -455,6 +456,8 @@ zink_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_NATIVE_FENCE_FD:
       return screen->instance_info.have_KHR_external_semaphore_capabilities && screen->info.have_KHR_external_semaphore_fd;
 
+   case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
+   case PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE:
    case PIPE_CAP_SHAREABLE_SHADERS:
    case PIPE_CAP_DEVICE_RESET_STATUS_QUERY:
    case PIPE_CAP_QUERY_MEMORY_INFO:
@@ -1501,7 +1504,7 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
    if (!zink_is_swapchain(res))
       return;
 
-   ctx = zink_tc_context_unwrap(pctx);
+   ctx = zink_tc_context_unwrap(pctx, screen->threaded);
 
    if (!zink_kopper_acquired(res->obj->dt, res->obj->dt_idx)) {
       /* swapbuffers to an undefined surface: acquire and present garbage */
@@ -1509,6 +1512,8 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
       ctx->needs_present = res;
       /* set batch usage to submit acquire semaphore */
       zink_batch_resource_usage_set(&ctx->batch, res, true, false);
+      /* ensure the resource is set up to present garbage */
+      ctx->base.flush_resource(&ctx->base, pres);
    }
 
    /* handle any outstanding acquire submits (not just from above) */
@@ -2220,7 +2225,6 @@ static void
 init_driver_workarounds(struct zink_screen *screen)
 {
    /* enable implicit sync for all non-mesa drivers */
-   screen->driver_workarounds.force_pipeline_library = debug_get_bool_option("ZINK_PIPELINE_LIBRARY_FORCE", false);
    screen->driver_workarounds.implicit_sync = true;
    switch (screen->info.driver_props.driverID) {
    case VK_DRIVER_ID_MESA_RADV:
@@ -2235,18 +2239,37 @@ init_driver_workarounds(struct zink_screen *screen)
    default:
       break;
    }
+   if (screen->info.line_rast_feats.stippledRectangularLines &&
+       screen->info.line_rast_feats.stippledBresenhamLines &&
+       screen->info.line_rast_feats.stippledSmoothLines &&
+       !screen->info.dynamic_state3_feats.extendedDynamicState3LineStippleEnable)
+      screen->info.have_EXT_extended_dynamic_state3 = false;
+   if (!screen->info.dynamic_state3_feats.extendedDynamicState3PolygonMode ||
+       !screen->info.dynamic_state3_feats.extendedDynamicState3DepthClampEnable ||
+       !screen->info.dynamic_state3_feats.extendedDynamicState3DepthClipEnable ||
+       !screen->info.dynamic_state3_feats.extendedDynamicState3ProvokingVertexMode ||
+       !screen->info.dynamic_state3_feats.extendedDynamicState3LineRasterizationMode)
+      screen->info.have_EXT_extended_dynamic_state3 = false;
+   else if (screen->info.dynamic_state3_feats.extendedDynamicState3SampleMask &&
+            screen->info.dynamic_state3_feats.extendedDynamicState3AlphaToCoverageEnable &&
+            (!screen->info.feats.features.alphaToOne || screen->info.dynamic_state3_feats.extendedDynamicState3AlphaToOneEnable) &&
+            screen->info.dynamic_state3_feats.extendedDynamicState3ColorBlendEnable &&
+            screen->info.dynamic_state3_feats.extendedDynamicState3RasterizationSamples &&
+            screen->info.dynamic_state3_feats.extendedDynamicState3ColorWriteMask &&
+            screen->info.dynamic_state3_feats.extendedDynamicState3LogicOpEnable &&
+            screen->info.dynamic_state2_feats.extendedDynamicState2LogicOp)
+      screen->have_full_ds3 = true;
    if (screen->info.have_EXT_graphics_pipeline_library)
       screen->info.have_EXT_graphics_pipeline_library = screen->info.have_EXT_extended_dynamic_state &&
                                                         screen->info.have_EXT_extended_dynamic_state2 &&
-                                                        (screen->driver_workarounds.force_pipeline_library ||
+                                                        ((zink_debug & ZINK_DEBUG_GPL) ||
                                                          screen->info.dynamic_state2_feats.extendedDynamicState2PatchControlPoints) &&
+                                                        screen->info.have_EXT_extended_dynamic_state3 &&
                                                         screen->info.have_KHR_dynamic_rendering &&
                                                         screen->info.have_EXT_non_seamless_cube_map &&
-                                                        (screen->info.gpl_props.graphicsPipelineLibraryFastLinking ||
-                                                         screen->is_cpu ||
-                                                         screen->driver_workarounds.force_pipeline_library);
-   if (!screen->driver_workarounds.force_pipeline_library)
-      screen->info.have_EXT_graphics_pipeline_library = false;
+                                                        (!(zink_debug & ZINK_DEBUG_GPL) ||
+                                                         screen->info.gpl_props.graphicsPipelineLibraryFastLinking ||
+                                                         screen->is_cpu);
    screen->driver_workarounds.broken_l4a4 = screen->info.driver_props.driverID == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
    screen->driver_workarounds.depth_clip_control_missing = !screen->info.have_EXT_depth_clip_control;
    if (screen->info.driver_props.driverID == VK_DRIVER_ID_AMD_PROPRIETARY)
@@ -2267,6 +2290,32 @@ init_driver_workarounds(struct zink_screen *screen)
       screen->driver_workarounds.z16_unscaled_bias = 1<<15;
    else
       screen->driver_workarounds.z16_unscaled_bias = 1<<16;
+   /* these drivers don't use VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, so it can always be set */
+   switch (screen->info.driver_props.driverID) {
+   case VK_DRIVER_ID_MESA_RADV:
+   case VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+   case VK_DRIVER_ID_MESA_LLVMPIPE:
+   case VK_DRIVER_ID_MESA_VENUS:
+   case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
+   case VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS:
+   case VK_DRIVER_ID_IMAGINATION_PROPRIETARY:
+      screen->driver_workarounds.always_feedback_loop = screen->info.have_EXT_attachment_feedback_loop_layout;
+      break;
+   default:
+      break;
+   }
+   /* these drivers don't use VK_PIPELINE_CREATE_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, so it can always be set */
+   switch (screen->info.driver_props.driverID) {
+   case VK_DRIVER_ID_MESA_RADV:
+   case VK_DRIVER_ID_MESA_LLVMPIPE:
+   case VK_DRIVER_ID_MESA_VENUS:
+   case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
+   case VK_DRIVER_ID_IMAGINATION_PROPRIETARY:
+      screen->driver_workarounds.always_feedback_loop_zs = screen->info.have_EXT_attachment_feedback_loop_layout;
+      break;
+   default:
+      break;
+   }
 }
 
 static struct zink_screen *
@@ -2541,10 +2590,9 @@ zink_internal_create_screen(const struct pipe_screen_config *config)
       goto fail;
    }
 
-   if (!screen->driver_workarounds.force_pipeline_library)
-      screen->optimal_keys = !screen->need_decompose_attrs && screen->info.have_EXT_non_seamless_cube_map && !screen->driconf.inline_uniforms;
-   if (screen->optimal_keys)
-      screen->driver_workarounds.force_pipeline_library = false;
+   screen->optimal_keys = !screen->need_decompose_attrs && screen->info.have_EXT_non_seamless_cube_map && !screen->driconf.inline_uniforms;
+   if (!screen->optimal_keys)
+      screen->info.have_EXT_graphics_pipeline_library = false;
 
    return screen;
 

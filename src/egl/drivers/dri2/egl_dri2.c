@@ -1225,7 +1225,6 @@ dri2_display_release(_EGLDisplay *disp)
    if (!p_atomic_dec_zero(&dri2_dpy->ref_count))
       return;
 
-   _eglCleanupDisplay(disp);
    dri2_display_destroy(disp);
 }
 
@@ -1327,9 +1326,6 @@ dri2_egl_surface_free_local_buffers(struct dri2_egl_surface *dri2_surf)
 static EGLBoolean
 dri2_terminate(_EGLDisplay *disp)
 {
-   /* Release all non-current Context/Surfaces. */
-   _eglReleaseDisplayResources(disp);
-
    dri2_display_release(disp);
 
    return EGL_TRUE;
@@ -1829,7 +1825,7 @@ dri2_make_current(_EGLDisplay *disp, _EGLSurface *dsurf,
    rdraw = (rsurf) ? dri2_dpy->vtbl->get_dri_drawable(rsurf) : NULL;
    cctx = (dri2_ctx) ? dri2_ctx->dri_context : NULL;
 
-   if (cctx || ddraw || rdraw) {
+   if (cctx) {
       if (!dri2_dpy->core->bindContext(cctx, ddraw, rdraw)) {
          _EGLContext *tmp_ctx;
 

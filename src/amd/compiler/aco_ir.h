@@ -1726,8 +1726,9 @@ struct Pseudo_branch_instruction : public Instruction {
     * A value of 0 means the target has not been initialized (BB0 cannot be a branch target).
     */
    uint32_t target[2];
+   nir_selection_control selection_control;
 };
-static_assert(sizeof(Pseudo_branch_instruction) == sizeof(Instruction) + 8, "Unexpected padding");
+static_assert(sizeof(Pseudo_branch_instruction) == sizeof(Instruction) + 12, "Unexpected padding");
 
 struct Pseudo_barrier_instruction : public Instruction {
    memory_sync_info sync;
@@ -1774,8 +1775,13 @@ struct Pseudo_reduction_instruction : public Instruction {
 static_assert(sizeof(Pseudo_reduction_instruction) == sizeof(Instruction) + 4,
               "Unexpected padding");
 
+extern thread_local aco::monotonic_buffer_resource instruction_buffer;
+
 struct instr_deleter_functor {
-   void operator()(void* p) { free(p); }
+   /* Don't yet free any instructions. They will be de-allocated
+    * all at once after compilation finished.
+    */
+   void operator()(void* p) { return; }
 };
 
 template <typename T> using aco_ptr = std::unique_ptr<T, instr_deleter_functor>;
@@ -1787,13 +1793,14 @@ create_instruction(aco_opcode opcode, Format format, uint32_t num_operands,
 {
    std::size_t size =
       sizeof(T) + num_operands * sizeof(Operand) + num_definitions * sizeof(Definition);
-   char* data = (char*)calloc(1, size);
+   void* data = instruction_buffer.allocate(size, alignof(uint32_t));
+   memset(data, 0, size);
    T* inst = (T*)data;
 
    inst->opcode = opcode;
    inst->format = format;
 
-   uint16_t operands_offset = data + sizeof(T) - (char*)&inst->operands;
+   uint16_t operands_offset = sizeof(T) - offsetof(Instruction, operands);
    inst->operands = aco::span<Operand>(operands_offset, num_operands);
    uint16_t definitions_offset = (char*)inst->operands.end() - (char*)&inst->definitions;
    inst->definitions = aco::span<Definition>(definitions_offset, num_definitions);
@@ -2283,6 +2290,7 @@ void lower_to_hw_instr(Program* program);
 void schedule_program(Program* program, live& live_vars);
 void spill(Program* program, live& live_vars);
 void insert_wait_states(Program* program);
+bool dealloc_vgprs(Program* program);
 void insert_NOPs(Program* program);
 void form_hard_clauses(Program* program);
 unsigned emit_program(Program* program, std::vector<uint32_t>& code);
@@ -2314,7 +2322,8 @@ enum print_flags {
 };
 
 void aco_print_operand(const Operand* operand, FILE* output, unsigned flags = 0);
-void aco_print_instr(const Instruction* instr, FILE* output, unsigned flags = 0);
+void aco_print_instr(enum amd_gfx_level gfx_level, const Instruction* instr, FILE* output,
+                     unsigned flags = 0);
 void aco_print_program(const Program* program, FILE* output, unsigned flags = 0);
 void aco_print_program(const Program* program, FILE* output, const live& live_vars,
                        unsigned flags = 0);
