@@ -1,0 +1,85 @@
+# Build for Windows
+
+name: Windows-LLVMpipe-MinGW3-mini
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  #push:
+  #  branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+env:
+  CC: x86_64-w64-mingw32-gcc-posix
+  CXX: x86_64-w64-mingw32-g++-posix
+  WINDRES: x86_64-w64-mingw32-windres
+  LP_NATIVE_VECTOR_WIDTH: 128
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-22.04
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          echo Install dependencies...
+          sudo apt-get update
+          sudo apt-get install wine64 wine binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix mingw-w64 ninja-build ccache -y
+          sudo pip install meson mako
+
+      - name: x86_build-mingw-patch
+        run: sudo bash my_scripts/x86_build-mingw-patch-mini.sh
+
+      - name: x86_build-mingw-source-deps
+        run: sudo bash my_scripts/x86_build-mingw-source-deps-mini.sh
+
+      - name: Add llvm meson.build
+        run: |
+          mkdir -p subprojects/llvm
+          cp my_scripts/llvm-meson.build subprojects/llvm/meson.build
+
+      - name: Configure
+        run: |
+          echo Configure...
+          echo $PATH
+          mkdir -p build-mini/install
+          meson -D gallium-drivers="swrast" -D llvm=enabled -D cpp_rtti=true -D zlib=enabled --cross-file=x86_64-w64-mingw32-cross-llvm2.txt --buildtype=release build-mini
+        env:
+          DESTDIR: /home/runner/work/mesa/mesa/build-mini/install
+
+      - name: Compile
+        run: ninja -C build-mini/
+
+      - name: Install
+        run: ninja -C build-mini/ install
+        env:
+          DESTDIR: /home/runner/work/mesa/mesa/build-mini/install
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v3.0.0
+        with:
+          name: build-mini
+          path: build-mini/install
+
+      - name: Prepare dlls to upload
+        run: |
+          mkdir dlls
+          mkdir dlls/bin
+          mkdir dlls/lib
+          sudo mv /usr/x86_64-w64-mingw32/lib/*.dll dlls/lib
+          sudo mv /usr/x86_64-w64-mingw32/bin/*.dll dlls/bin
+
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v3.0.0
+        with:
+          name: dlls
+          path: dlls
