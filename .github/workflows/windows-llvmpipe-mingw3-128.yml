@@ -1,6 +1,6 @@
 # Build for Windows
 
-name: Windows-LLVMpipe-MinGW3-mini
+name: Windows-LLVMpipe-MinGW3-mini-128
 
 # Controls when the workflow will run
 on:
