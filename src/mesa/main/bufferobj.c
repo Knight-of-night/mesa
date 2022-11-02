@@ -32,7 +32,7 @@
 
 #include <stdbool.h>
 #include <inttypes.h>  /* for PRId64 macro */
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "glheader.h"
 #include "enums.h"
 #include "hash.h"
@@ -650,7 +650,7 @@ buffer_usage_warning(struct gl_context *ctx, GLuint *id, const char *fmt, ...)
  * glBindBuffer() so that glIsBuffer() can work correctly.
  */
 static struct gl_buffer_object DummyBufferObject = {
-   .MinMaxCacheMutex = _SIMPLE_MTX_INITIALIZER_NP,
+   .MinMaxCacheMutex = SIMPLE_MTX_INITIALIZER,
    .RefCount = 1000*1000*1000,  /* never delete */
 };
 
@@ -1062,7 +1062,7 @@ get_no_minmax_cache()
    static bool disable = false;
 
    if (!read) {
-      disable = env_var_as_boolean("MESA_NO_MINMAX_CACHE", false);
+      disable = debug_get_bool_option("MESA_NO_MINMAX_CACHE", false);
       read = true;
    }
 

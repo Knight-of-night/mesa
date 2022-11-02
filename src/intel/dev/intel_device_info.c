@@ -34,7 +34,7 @@
 #include "intel_hwconfig.h"
 #include "intel/common/intel_gem.h"
 #include "util/bitscan.h"
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "util/log.h"
 #include "util/macros.h"
 #include "util/os_misc.h"
@@ -996,11 +996,13 @@ static const struct intel_device_info intel_device_info_rkl_gt1 = {
 static const struct intel_device_info intel_device_info_adl_gt05 = {
    GFX12_GT05_FEATURES,
    .platform = INTEL_PLATFORM_ADL,
+   .display_ver = 13,
 };
 
 static const struct intel_device_info intel_device_info_adl_gt1 = {
    GFX12_GT_FEATURES(1),
    .platform = INTEL_PLATFORM_ADL,
+   .display_ver = 13,
 };
 
 static const struct intel_device_info intel_device_info_adl_n = {
@@ -1019,6 +1021,7 @@ static const struct intel_device_info intel_device_info_rpl = {
    GFX12_FEATURES(1, 1, 4),
    .num_subslices = dual_subslices(2),
    .platform = INTEL_PLATFORM_RPL,
+   .display_ver = 13,
 };
 
 static const struct intel_device_info intel_device_info_rpl_p = {
@@ -1055,6 +1058,7 @@ static const struct intel_device_info intel_device_info_sg1 = {
 #define DG2_FEATURES                                            \
    /* (Sub)slice info comes from the kernel topology info */    \
    XEHP_FEATURES(0, 1, 0),                                      \
+   .display_ver = 13,                                           \
    .revision = 4, /* For offline compiler */                    \
    .num_subslices = dual_subslices(1),                          \
    .has_lsc = true,                                             \
@@ -1921,16 +1925,16 @@ init_max_scratch_ids(struct intel_device_info *devinfo)
 
 static unsigned
 intel_device_info_calc_engine_prefetch(const struct intel_device_info *devinfo,
-                                       enum drm_i915_gem_engine_class engine_class)
+                                       enum intel_engine_class engine_class)
 {
    if (devinfo->verx10 < 125)
       return 512;
 
    if (intel_device_info_is_mtl(devinfo)) {
       switch (engine_class) {
-      case I915_ENGINE_CLASS_RENDER:
+      case INTEL_ENGINE_CLASS_RENDER:
          return 2048;
-      case I915_ENGINE_CLASS_COMPUTE:
+      case INTEL_ENGINE_CLASS_COMPUTE:
          return 1024;
       default:
          return 512;
@@ -2033,7 +2037,7 @@ intel_get_device_info_from_fd(int fd, struct intel_device_info *devinfo)
    devinfo->pci_device_id = drmdev->deviceinfo.pci->device_id;
    devinfo->pci_revision_id = drmdev->deviceinfo.pci->revision_id;
    drmFreeDevice(&drmdev);
-   devinfo->no_hw = env_var_as_boolean("INTEL_NO_HW", false);
+   devinfo->no_hw = debug_get_bool_option("INTEL_NO_HW", false);
 
    if (devinfo->ver == 10) {
       mesa_loge("Gfx10 support is redacted.");
@@ -2063,7 +2067,7 @@ intel_get_device_info_from_fd(int fd, struct intel_device_info *devinfo)
 
    init_max_scratch_ids(devinfo);
 
-   for (enum drm_i915_gem_engine_class engine = I915_ENGINE_CLASS_RENDER;
+   for (enum intel_engine_class engine = INTEL_ENGINE_CLASS_RENDER;
         engine < ARRAY_SIZE(devinfo->engine_class_prefetch); engine++)
       devinfo->engine_class_prefetch[engine] =
             intel_device_info_calc_engine_prefetch(devinfo, engine);

@@ -607,7 +607,9 @@ get_subdword_definition_info(Program* program, const aco_ptr<Instruction>& instr
    amd_gfx_level gfx_level = program->gfx_level;
 
    if (instr->isPseudo()) {
-      if (gfx_level >= GFX8)
+      if (instr->opcode == aco_opcode::p_interp_gfx11)
+         return std::make_pair(4u, 4u);
+      else if (gfx_level >= GFX8)
          return std::make_pair(rc.bytes() % 2 == 0 ? 2 : 1, rc.bytes());
       else
          return std::make_pair(4, rc.size() * 4u);
@@ -769,6 +771,7 @@ adjust_max_used_regs(ra_ctx& ctx, RegClass rc, unsigned reg)
 enum UpdateRenames {
    rename_not_killed_ops = 0x1,
    fill_killed_ops = 0x2,
+   rename_precolored_ops = 0x4,
 };
 MESA_DEFINE_CPP_ENUM_BITFIELD_OPERATORS(UpdateRenames);
 
@@ -848,6 +851,11 @@ update_renames(ra_ctx& ctx, RegisterFile& reg_file,
          if (!op.isTemp())
             continue;
          if (op.tempId() == copy.first.tempId()) {
+            /* only rename precolored operands if the copy-location matches */
+            if ((flags & rename_precolored_ops) && op.isFixed() &&
+                op.physReg() != copy.second.physReg())
+               continue;
+
             bool omit_renaming = !(flags & rename_not_killed_ops) && !op.isKillBeforeDef();
             for (std::pair<Operand, Definition>& pc : parallelcopies) {
                PhysReg def_reg = pc.second.physReg();
@@ -2017,7 +2025,8 @@ handle_fixed_operands(ra_ctx& ctx, RegisterFile& register_file,
    }
 
    get_regs_for_copies(ctx, tmp_file, parallelcopy, blocking_vars, instr, PhysRegInterval());
-   update_renames(ctx, register_file, parallelcopy, instr, rename_not_killed_ops | fill_killed_ops);
+   update_renames(ctx, register_file, parallelcopy, instr,
+                  rename_not_killed_ops | fill_killed_ops | rename_precolored_ops);
 }
 
 void

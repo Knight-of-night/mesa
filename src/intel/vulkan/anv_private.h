@@ -354,17 +354,6 @@ anv_clamp_f(float f, float min, float max)
       return f;
 }
 
-static inline bool
-anv_clear_mask(uint32_t *inout_mask, uint32_t clear_mask)
-{
-   if (*inout_mask & clear_mask) {
-      *inout_mask &= ~clear_mask;
-      return true;
-   } else {
-      return false;
-   }
-}
-
 static inline union isl_color_value
 vk_to_isl_color(VkClearColorValue color)
 {
@@ -396,20 +385,6 @@ vk_to_isl_color_with_format(VkClearColorValue color, enum isl_format format)
 #undef COPY_COLOR_CHANNEL
 
    return isl_color;
-}
-
-static inline void *anv_unpack_ptr(uintptr_t ptr, int bits, int *flags)
-{
-   uintptr_t mask = (1ull << bits) - 1;
-   *flags = ptr & mask;
-   return (void *) (ptr & ~mask);
-}
-
-static inline uintptr_t anv_pack_ptr(void *ptr, int bits, int flags)
-{
-   uintptr_t value = (uintptr_t) ptr;
-   uintptr_t mask = (1ull << bits) - 1;
-   return value | (mask & flags);
 }
 
 /**
@@ -1013,6 +988,9 @@ struct anv_physical_device {
      */
     bool                                        has_implicit_ccs;
 
+    /** True if we can create protected contexts. */
+    bool                                        has_protected_contexts;
+
     bool                                        always_flush_cache;
 
     struct {
@@ -1077,6 +1055,7 @@ struct anv_instance {
     bool                                        assume_full_subgroups;
     bool                                        limit_trig_input_range;
     bool                                        sample_mask_out_opengl_behaviour;
+    bool                                        fp64_workaround_enabled;
     float                                       lower_depth_range_rate;
 };
 
@@ -1102,6 +1081,7 @@ struct anv_queue {
 
 struct nir_xfb_info;
 struct anv_pipeline_bind_map;
+struct anv_push_descriptor_info;
 
 extern const struct vk_pipeline_cache_object_ops *const anv_cache_import_ops[2];
 
@@ -1122,7 +1102,8 @@ anv_device_upload_kernel(struct anv_device *device,
                          const struct brw_compile_stats *stats,
                          uint32_t num_stats,
                          const struct nir_xfb_info *xfb_info,
-                         const struct anv_pipeline_bind_map *bind_map);
+                         const struct anv_pipeline_bind_map *bind_map,
+                         const struct anv_push_descriptor_info *push_desc_info);
 
 struct nir_shader;
 struct nir_shader_compiler_options;
@@ -1139,6 +1120,9 @@ anv_device_upload_nir(struct anv_device *device,
                       struct vk_pipeline_cache *cache,
                       const struct nir_shader *nir,
                       unsigned char sha1_key[20]);
+
+void
+anv_load_fp64_shader(struct anv_device *device);
 
 enum anv_rt_bvh_build_method {
    ANV_BVH_BUILD_METHOD_TRIVIAL,
@@ -1257,6 +1241,8 @@ struct anv_device {
     struct intel_debug_block_frame              *debug_frame_desc;
 
     struct intel_ds_device                       ds;
+
+    nir_shader                                  *fp64_nir;
 };
 
 static inline struct anv_state
@@ -1708,6 +1694,8 @@ bool anv_descriptor_requires_bindless(const struct anv_physical_device *pdevice,
 struct anv_descriptor_set_layout {
    struct vk_object_base base;
 
+   VkDescriptorSetLayoutCreateFlags flags;
+
    /* Descriptor set layouts can be destroyed at almost any time */
    uint32_t ref_cnt;
 
@@ -1790,6 +1778,14 @@ struct anv_descriptor_set {
     * be larger than the size of the descriptor set.
     */
    uint32_t size;
+
+   /* Is this descriptor set a push descriptor */
+   bool is_push;
+
+   /* Bitfield of descriptors for which we need to generate surface states.
+    * Only valid for push descriptors
+    */
+   uint32_t generate_surface_states;
 
    /* State relative to anv_descriptor_pool::bo */
    struct anv_state desc_mem;
@@ -1904,13 +1900,17 @@ anv_descriptor_set_write_buffer_view(struct anv_device *device,
 void
 anv_descriptor_set_write_buffer(struct anv_device *device,
                                 struct anv_descriptor_set *set,
-                                struct anv_state_stream *alloc_stream,
                                 VkDescriptorType type,
                                 struct anv_buffer *buffer,
                                 uint32_t binding,
                                 uint32_t element,
                                 VkDeviceSize offset,
                                 VkDeviceSize range);
+
+void
+anv_descriptor_write_surface_state(struct anv_device *device,
+                                   struct anv_descriptor *desc,
+                                   struct anv_state surface_state);
 
 void
 anv_descriptor_set_write_acceleration_structure(struct anv_device *device,
@@ -1930,7 +1930,6 @@ anv_descriptor_set_write_inline_uniform_data(struct anv_device *device,
 void
 anv_descriptor_set_write_template(struct anv_device *device,
                                   struct anv_descriptor_set *set,
-                                  struct anv_state_stream *alloc_stream,
                                   const struct vk_descriptor_update_template *template,
                                   const void *data);
 
@@ -1947,6 +1946,11 @@ struct anv_pipeline_binding {
     * into account.
     */
    uint32_t index;
+
+   /** Binding in the descriptor set. Not valid for any of the
+    * ANV_DESCRIPTOR_SET_*
+    */
+   uint32_t binding;
 
    /** The descriptor set this surface corresponds to.
     *
@@ -1965,11 +1969,6 @@ struct anv_pipeline_binding {
 
    /** For a storage image, whether it requires a lowered surface */
    uint8_t lowered_storage_surface;
-
-   /** Pad to 64 bits so that there are no holes and we can safely memcmp
-    * assuming POD zero-initialization.
-    */
-   uint8_t pad;
 };
 
 struct anv_push_range {
@@ -2002,6 +2001,10 @@ struct anv_pipeline_layout {
    unsigned char sha1[20];
 };
 
+const struct anv_descriptor_set_layout *
+anv_pipeline_layout_get_push_set(const struct anv_pipeline_layout *layout,
+                                 uint8_t *desc_idx);
+
 struct anv_buffer {
    struct vk_buffer vk;
 
@@ -2014,6 +2017,7 @@ enum anv_cmd_dirty_bits {
    ANV_CMD_DIRTY_INDEX_BUFFER                        = 1 << 1,
    ANV_CMD_DIRTY_RENDER_TARGETS                      = 1 << 2,
    ANV_CMD_DIRTY_XFB_ENABLE                          = 1 << 3,
+   ANV_CMD_DIRTY_RESTART_INDEX                       = 1 << 4,
 };
 typedef enum anv_cmd_dirty_bits anv_cmd_dirty_mask_t;
 
@@ -2432,7 +2436,7 @@ anv_gfx8_9_vb_cache_range_needs_workaround(struct anv_vb_cache_range *bound,
  */
 struct anv_cmd_pipeline_state {
    struct anv_descriptor_set *descriptors[MAX_SETS];
-   struct anv_push_descriptor_set *push_descriptors[MAX_SETS];
+   struct anv_push_descriptor_set *push_descriptor;
 
    struct anv_push_constants push_constants;
 
@@ -2536,6 +2540,7 @@ struct anv_cmd_state {
 
    enum anv_pipe_bits                           pending_pipe_bits;
    VkShaderStageFlags                           descriptors_dirty;
+   VkShaderStageFlags                           push_descriptors_dirty;
    VkShaderStageFlags                           push_constants_dirty;
 
    struct anv_vertex_binding                    vertex_bindings[MAX_VBS];
@@ -2846,6 +2851,17 @@ struct anv_pipeline_bind_map {
    struct anv_push_range                        push_ranges[4];
 };
 
+struct anv_push_descriptor_info {
+   /* A bitfield of descriptors used. */
+   uint32_t used_descriptors;
+
+   /* A bitfield of UBOs bindings fully promoted to push constants. */
+   uint32_t fully_promoted_ubo_descriptors;
+
+   /* */
+   uint8_t used_set_buffer;
+};
+
 struct anv_shader_bin {
    struct vk_pipeline_cache_object base;
 
@@ -2862,6 +2878,8 @@ struct anv_shader_bin {
 
    struct nir_xfb_info *xfb_info;
 
+   struct anv_push_descriptor_info push_desc_info;
+
    struct anv_pipeline_bind_map bind_map;
 };
 
@@ -2874,7 +2892,8 @@ anv_shader_bin_create(struct anv_device *device,
                       uint32_t prog_data_size,
                       const struct brw_compile_stats *stats, uint32_t num_stats,
                       const struct nir_xfb_info *xfb_info,
-                      const struct anv_pipeline_bind_map *bind_map);
+                      const struct anv_pipeline_bind_map *bind_map,
+                      const struct anv_push_descriptor_info *push_desc_info);
 
 static inline void
 anv_shader_bin_ref(struct anv_shader_bin *shader)
@@ -2932,6 +2951,16 @@ struct anv_pipeline {
 
    uint32_t                                     ray_queries;
 
+   /**
+    * Mask of stages that are accessing push descriptors.
+    */
+   VkShaderStageFlags                           use_push_descriptor;
+
+   /**
+    * Mask of stages that are accessing the push descriptors buffer.
+    */
+   VkShaderStageFlags                           use_push_descriptor_buffer;
+
    struct util_dynarray                         executables;
 
    const struct intel_l3_config *               l3_config;
@@ -2951,21 +2980,14 @@ struct anv_graphics_pipeline {
    /* These fields are required with dynamic primitive topology,
     * rasterization_samples used only with gen < 8.
     */
-   VkLineRasterizationModeEXT                   line_mode;
-   VkPolygonMode                                polygon_mode;
    uint32_t                                     patch_control_points;
    uint32_t                                     rasterization_samples;
-
-   VkColorComponentFlags                        color_comp_writes[MAX_RTS];
 
    uint32_t                                     view_mask;
    uint32_t                                     instance_multiplier;
 
-   bool                                         depth_clamp_enable;
-   bool                                         depth_clip_enable;
    bool                                         kill_pixel;
    bool                                         force_fragment_thread_dispatch;
-   bool                                         negative_one_to_one;
 
    uint32_t                                     vb_used;
    struct anv_pipeline_vertex_binding {
@@ -2987,7 +3009,6 @@ struct anv_graphics_pipeline {
       uint32_t                                  sf[4];
       uint32_t                                  raster[5];
       uint32_t                                  wm[2];
-      uint32_t                                  ps_blend[2];
       uint32_t                                  blend_state[1 + MAX_RTS * 2];
       uint32_t                                  streamout_state[5];
    } gfx8;
@@ -3077,7 +3098,7 @@ anv_cmd_buffer_all_color_write_masked(const struct anv_cmd_buffer *cmd_buffer)
 
    /* Or all write masks are empty */
    for (uint32_t i = 0; i < state->color_att_count; i++) {
-      if (state->pipeline->color_comp_writes[i] != 0)
+      if (dyn->cb.attachments[i].write_mask != 0)
          return false;
    }
 
@@ -3852,6 +3873,55 @@ anv_rasterization_aa_mode(VkPolygonMode raster_mode,
        line_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH_EXT)
       return true;
    return false;
+}
+
+static inline VkLineRasterizationModeEXT
+anv_line_rasterization_mode(VkLineRasterizationModeEXT line_mode,
+                            unsigned rasterization_samples)
+{
+   if (line_mode == VK_LINE_RASTERIZATION_MODE_DEFAULT_EXT) {
+      if (rasterization_samples > 1) {
+         return VK_LINE_RASTERIZATION_MODE_RECTANGULAR_EXT;
+      } else {
+         return VK_LINE_RASTERIZATION_MODE_BRESENHAM_EXT;
+      }
+   }
+   return line_mode;
+}
+
+/* Fill provoking vertex mode to packet. */
+#define ANV_SETUP_PROVOKING_VERTEX(cmd, mode)         \
+   switch (dyn->rs.provoking_vertex) {                \
+   case VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT:    \
+      cmd.TriangleStripListProvokingVertexSelect = 0; \
+      cmd.LineStripListProvokingVertexSelect = 0;     \
+      cmd.TriangleFanProvokingVertexSelect = 1;       \
+      break;                                          \
+   case VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT:     \
+      cmd.TriangleStripListProvokingVertexSelect = 2; \
+      cmd.LineStripListProvokingVertexSelect = 1;     \
+      cmd.TriangleFanProvokingVertexSelect = 2;       \
+      break;                                          \
+   default:                                           \
+      unreachable("Invalid provoking vertex mode");   \
+   }                                                  \
+
+static inline bool
+anv_is_dual_src_blend_factor(VkBlendFactor factor)
+{
+   return factor == VK_BLEND_FACTOR_SRC1_COLOR ||
+          factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR ||
+          factor == VK_BLEND_FACTOR_SRC1_ALPHA ||
+          factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+}
+
+static inline bool
+anv_is_dual_src_blend_equation(const struct vk_color_blend_attachment_state *cb)
+{
+   return anv_is_dual_src_blend_factor(cb->src_color_blend_factor) &&
+          anv_is_dual_src_blend_factor(cb->dst_color_blend_factor) &&
+          anv_is_dual_src_blend_factor(cb->src_alpha_blend_factor) &&
+          anv_is_dual_src_blend_factor(cb->dst_alpha_blend_factor);
 }
 
 VkFormatFeatureFlags2

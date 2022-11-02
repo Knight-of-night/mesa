@@ -362,6 +362,13 @@ optimise_nir(nir_shader *nir, unsigned quirks, bool is_blend, bool is_blit)
         NIR_PASS(progress, nir, pan_lower_helper_invocation);
         NIR_PASS(progress, nir, pan_lower_sample_pos);
 
+        if (nir->xfb_info != NULL && nir->info.has_transform_feedback_varyings) {
+                NIR_PASS_V(nir, nir_io_add_const_offset_to_base,
+                           nir_var_shader_in | nir_var_shader_out);
+                NIR_PASS_V(nir, nir_io_add_intrinsic_xfb_info);
+                NIR_PASS_V(nir, pan_lower_xfb);
+        }
+
         NIR_PASS(progress, nir, midgard_nir_lower_algebraic_early);
         NIR_PASS_V(nir, nir_lower_alu_to_scalar, mdg_should_scalarize, NULL);
 
@@ -1756,11 +1763,7 @@ output_load_rt_addr(compiler_context *ctx, nir_intrinsic_instr *instr)
         if (ctx->inputs->is_blend)
                 return MIDGARD_COLOR_RT0 + ctx->inputs->blend.rt;
 
-        const nir_variable *var;
-        var = nir_find_variable_with_driver_location(ctx->nir, nir_var_shader_out, nir_intrinsic_base(instr));
-        assert(var);
-
-        unsigned loc = var->data.location;
+        unsigned loc = nir_intrinsic_io_semantics(instr).location;
 
         if (loc >= FRAG_RESULT_DATA0)
                 return loc - FRAG_RESULT_DATA0;
@@ -1981,15 +1984,10 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                         }
 
                         if (writeout & PAN_WRITEOUT_C) {
-                                const nir_variable *var =
-                                        nir_find_variable_with_driver_location(ctx->nir, nir_var_shader_out,
-                                                 nir_intrinsic_base(instr));
+                                nir_io_semantics sem = nir_intrinsic_io_semantics(instr);
 
-                                assert(var != NULL);
-                                assert(var->data.location >= FRAG_RESULT_DATA0);
-
-                                rt = MIDGARD_COLOR_RT0 + var->data.location -
-                                     FRAG_RESULT_DATA0;
+                                rt = MIDGARD_COLOR_RT0 +
+                                     (sem.location - FRAG_RESULT_DATA0);
                         } else {
                                 rt = MIDGARD_ZS_RT;
                         }
@@ -2101,9 +2099,14 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                 emit_global(ctx, &instr->instr, false, reg, &instr->src[1], seg);
                 break;
 
-        case nir_intrinsic_load_first_vertex:
         case nir_intrinsic_load_ssbo_address:
+        case nir_intrinsic_load_xfb_address:
+                emit_sysval_read(ctx, &instr->instr, 2, 0);
+                break;
+
+        case nir_intrinsic_load_first_vertex:
         case nir_intrinsic_load_work_dim:
+        case nir_intrinsic_load_num_vertices:
                 emit_sysval_read(ctx, &instr->instr, 1, 0);
                 break;
 
@@ -2112,15 +2115,12 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                 break;
 
         case nir_intrinsic_load_base_instance:
+        case nir_intrinsic_get_ssbo_size:
                 emit_sysval_read(ctx, &instr->instr, 1, 8);
                 break;
 
         case nir_intrinsic_load_sample_positions_pan:
                 emit_sysval_read(ctx, &instr->instr, 2, 0);
-                break;
-
-        case nir_intrinsic_get_ssbo_size:
-                emit_sysval_read(ctx, &instr->instr, 1, 8);
                 break;
 
         case nir_intrinsic_load_viewport_scale:
@@ -2155,12 +2155,15 @@ emit_intrinsic(compiler_context *ctx, nir_intrinsic_instr *instr)
                 emit_special(ctx, instr, 97);
                 break;
 
-        /* Midgard doesn't seem to want special handling */
+        /* Midgard doesn't seem to want special handling, though we do need to
+         * take care when scheduling to avoid incorrect reordering.
+         */
         case nir_intrinsic_memory_barrier:
         case nir_intrinsic_memory_barrier_buffer:
         case nir_intrinsic_memory_barrier_image:
         case nir_intrinsic_memory_barrier_shared:
         case nir_intrinsic_group_memory_barrier:
+                schedule_barrier(ctx);
                 break;
 
         case nir_intrinsic_control_barrier:

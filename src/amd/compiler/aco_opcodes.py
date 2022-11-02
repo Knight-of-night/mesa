@@ -99,7 +99,7 @@ class Format(Enum):
          return [('uint8_t', 'attr', 0),
                  ('uint8_t', 'attr_chan', 0),
                  ('memory_sync_info', 'sync', 'memory_sync_info()'),
-                 ('uint8_t', 'wait_vdst', 0)]
+                 ('uint8_t', 'wait_vdst', 15)]
       elif self == Format.MTBUF:
          return [('unsigned', 'dfmt', None),
                  ('unsigned', 'nfmt', None),
@@ -334,6 +334,11 @@ opcode("p_init_scratch")
 
 # jumps to a shader epilog
 opcode("p_jump_to_epilog")
+
+# loads and interpolates a fragment shader input with a correct exec mask
+#dst0=result, dst1=exec_tmp, src0=linear_vgpr, src1=attribute, src2=component, src3=coord1, src4=coord2, src5=m0
+#dst0=result, dst1=exec_tmp, src0=linear_vgpr, src1=attribute, src2=component, src3=dpp_ctrl, src4=m0
+opcode("p_interp_gfx11")
 
 # SOP2 instructions: 2 scalar inputs, 1 scalar output (+optional scc)
 SOP2 = {

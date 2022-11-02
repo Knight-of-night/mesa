@@ -99,8 +99,8 @@ intersect_ray_amd_software_box(struct radv_device *device, nir_builder *b, nir_s
    for (int i = 0; i < 4; i++) {
       const uint32_t child_offset = offsetof(struct radv_bvh_box32_node, children[i]);
       const uint32_t coord_offsets[2] = {
-         offsetof(struct radv_bvh_box32_node, coords[i][0][0]),
-         offsetof(struct radv_bvh_box32_node, coords[i][1][0]),
+         offsetof(struct radv_bvh_box32_node, coords[i].min.x),
+         offsetof(struct radv_bvh_box32_node, coords[i].max.x),
       };
 
       /* node->children[i] -> uint */
@@ -427,6 +427,9 @@ insert_traversal_triangle_case(struct radv_device *device, nir_builder *b,
                                const struct radv_ray_traversal_args *args, nir_ssa_def *result,
                                nir_ssa_def *bvh_node)
 {
+   if (!args->triangle_cb)
+      return;
+
    struct radv_triangle_intersection intersection;
    intersection.t = nir_channel(b, result, 0);
    nir_ssa_def *div = nir_channel(b, result, 1);
@@ -496,6 +499,9 @@ static void
 insert_traversal_aabb_case(struct radv_device *device, nir_builder *b,
                            const struct radv_ray_traversal_args *args, nir_ssa_def *bvh_node)
 {
+   if (!args->aabb_cb)
+      return;
+
    struct radv_leaf_intersection intersection;
    intersection.node_addr = build_node_to_addr(device, b, bvh_node);
    nir_ssa_def *triangle_info =
@@ -660,11 +666,6 @@ radv_build_ray_traversal(struct radv_device *device, nir_builder *b,
 
                   nir_ssa_def *wto_matrix[3];
                   nir_build_wto_matrix_load(b, instance_node_addr, wto_matrix);
-                  nir_ssa_def *instance_id = nir_build_load_global(
-                  b, 1, 32,
-                  nir_iadd_imm(b, instance_node_addr,
-                               offsetof(struct radv_bvh_instance_node, instance_id)));
-
 
                   nir_store_deref(b, args->vars.top_stack, nir_load_deref(b, args->vars.stack), 1);
                   nir_store_deref(b, args->vars.bvh_base,
@@ -689,8 +690,6 @@ radv_build_ray_traversal(struct radv_device *device, nir_builder *b,
 
                   nir_store_deref(b, args->vars.sbt_offset_and_flags,
                                   nir_channel(b, instance_data, 3), 1);
-                  nir_store_deref(b, args->vars.custom_instance_and_mask, instance_and_mask, 1);
-                  nir_store_deref(b, args->vars.instance_id, instance_id, 1);
                   nir_store_deref(b, args->vars.instance_addr, instance_node_addr, 1);
                }
                nir_pop_if(b, NULL);

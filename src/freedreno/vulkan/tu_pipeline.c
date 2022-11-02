@@ -17,7 +17,7 @@
 #include "nir/nir_builder.h"
 #include "nir/nir_serialize.h"
 #include "spirv/nir_spirv.h"
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "util/mesa-sha1.h"
 #include "vk_pipeline.h"
 #include "vk_render_pass.h"
@@ -1680,7 +1680,7 @@ tu6_emit_fs_outputs(struct tu_cs *cs,
       pipeline->lrz.fs.early_fragment_tests = fs->fs.early_fragment_tests;
 
       if (!fs->fs.early_fragment_tests &&
-          (fs->no_earlyz || fs->has_kill || fs->writes_pos || fs->writes_stencilref || fs->writes_smask)) {
+          (fs->no_earlyz || fs->writes_pos || fs->writes_stencilref || fs->writes_smask)) {
          pipeline->lrz.force_late_z = true;
       }
 
@@ -1755,12 +1755,9 @@ tu6_emit_patch_control_points(struct tu_cs *cs,
 
    const struct ir3_const_state *hs_const =
       &pipeline->program.link[MESA_SHADER_TESS_CTRL].const_state;
-   unsigned hs_constlen =
-      pipeline->program.link[MESA_SHADER_TESS_CTRL].constlen;
    uint32_t hs_base = hs_const->offsets.primitive_param;
-   uint32_t hs_param_dwords = MIN2((hs_constlen - hs_base) * 4, ARRAY_SIZE(hs_params));
    tu6_emit_const(cs, CP_LOAD_STATE6_GEOM, hs_base, SB6_HS_SHADER, 0,
-                  hs_param_dwords, hs_params);
+                  pipeline->program.hs_param_dwords, hs_params);
 
    uint32_t patch_local_mem_size_16b =
       patch_control_points * pipeline->program.vs_param_stride / 4;
@@ -2804,7 +2801,7 @@ tu_hash_stage(struct mesa_sha1 *ctx,
       blob_finish(&blob);
    } else {
       unsigned char stage_hash[SHA1_DIGEST_LENGTH];
-      vk_pipeline_hash_shader_stage(stage, stage_hash);
+      vk_pipeline_hash_shader_stage(stage, NULL, stage_hash);
       _mesa_sha1_update(ctx, stage_hash, sizeof(stage_hash));
    }
    _mesa_sha1_update(ctx, key, sizeof(*key));
@@ -3942,10 +3939,21 @@ tu_pipeline_builder_parse_shader_stages(struct tu_pipeline_builder *builder,
       pipeline->program.hs_param_stride = hs->output_size;
       pipeline->program.hs_vertices_out = hs->tess.tcs_vertices_out;
 
+      const struct ir3_const_state *hs_const =
+         &pipeline->program.link[MESA_SHADER_TESS_CTRL].const_state;
+      unsigned hs_constlen =
+         pipeline->program.link[MESA_SHADER_TESS_CTRL].constlen;
+      uint32_t hs_base = hs_const->offsets.primitive_param;
+      pipeline->program.hs_param_dwords =
+         MIN2((hs_constlen - hs_base) * 4, 8);
+
+      uint32_t state_size = TU6_EMIT_PATCH_CONTROL_POINTS_DWORDS(
+         pipeline->program.hs_param_dwords);
+
       struct tu_cs cs;
       if (tu_pipeline_static_state(pipeline, &cs,
                                    TU_DYNAMIC_STATE_PATCH_CONTROL_POINTS,
-                                   TU6_EMIT_PATCH_CONTROL_POINTS_DWORDS)) {
+                                   state_size)) {
          tu6_emit_patch_control_points(&cs, pipeline,
                                        pipeline->tess.patch_control_points);
       }
