@@ -54,6 +54,7 @@ else
   driver_swrast = declare_dependency()
 endif
 if with_gallium_asahi
+  subdir('winsys/asahi/drm')
   subdir('drivers/asahi')
 else
   driver_asahi = declare_dependency()
@@ -238,12 +239,6 @@ if with_platform_windows
   subdir('targets/libgl-gdi')
 endif
 if with_tests
-  subdir('targets/graw-null')
-  if with_platform_windows
-    subdir('targets/graw-gdi')
-  elif with_glx == 'gallium-xlib'
-    subdir('targets/graw-xlib')
-  endif
   subdir('tests')
 endif
 if with_swrast_vk

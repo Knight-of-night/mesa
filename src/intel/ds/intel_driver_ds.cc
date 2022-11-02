@@ -90,6 +90,11 @@ static const struct {
       true,
       INTEL_DS_QUEUE_STAGE_DRAW,
    },
+   {
+      "draw_mesh",
+      true,
+      INTEL_DS_QUEUE_STAGE_DRAW_MESH,
+   },
 };
 
 struct IntelRenderpassIncrementalState {
@@ -138,17 +143,6 @@ PERFETTO_DECLARE_DATA_SOURCE_STATIC_MEMBERS(IntelRenderpassDataSource);
 PERFETTO_DEFINE_DATA_SOURCE_STATIC_MEMBERS(IntelRenderpassDataSource);
 
 using perfetto::protos::pbzero::InternedGpuRenderStageSpecification_RenderStageCategory;
-
-InternedGpuRenderStageSpecification_RenderStageCategory
-i915_engine_class_to_category(enum drm_i915_gem_engine_class engine_class)
-{
-   switch (engine_class) {
-   case I915_ENGINE_CLASS_RENDER:
-      return InternedGpuRenderStageSpecification_RenderStageCategory::GRAPHICS;
-   default:
-      return InternedGpuRenderStageSpecification_RenderStageCategory::OTHER;
-   }
-}
 
 static void
 sync_timestamp(IntelRenderpassDataSource::TraceContext &ctx,
@@ -418,6 +412,9 @@ CREATE_DUAL_EVENT_CALLBACK(draw_indirect, INTEL_DS_QUEUE_STAGE_DRAW)
 CREATE_DUAL_EVENT_CALLBACK(draw_indirect_count, INTEL_DS_QUEUE_STAGE_DRAW)
 CREATE_DUAL_EVENT_CALLBACK(draw_indirect_byte_count, INTEL_DS_QUEUE_STAGE_DRAW)
 CREATE_DUAL_EVENT_CALLBACK(draw_indexed_indirect_count, INTEL_DS_QUEUE_STAGE_DRAW)
+CREATE_DUAL_EVENT_CALLBACK(draw_mesh, INTEL_DS_QUEUE_STAGE_DRAW_MESH)
+CREATE_DUAL_EVENT_CALLBACK(draw_mesh_indirect, INTEL_DS_QUEUE_STAGE_DRAW_MESH)
+CREATE_DUAL_EVENT_CALLBACK(draw_mesh_indirect_count, INTEL_DS_QUEUE_STAGE_DRAW_MESH)
 CREATE_DUAL_EVENT_CALLBACK(xfb, INTEL_DS_QUEUE_STAGE_CMD_BUFFER)
 CREATE_DUAL_EVENT_CALLBACK(compute, INTEL_DS_QUEUE_STAGE_COMPUTE)
 

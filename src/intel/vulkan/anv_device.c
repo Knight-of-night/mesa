@@ -41,7 +41,7 @@
 
 #include "anv_private.h"
 #include "anv_measure.h"
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "util/build_id.h"
 #include "util/disk_cache.h"
 #include "util/mesa-sha1.h"
@@ -70,6 +70,7 @@ static const driOptionDescription anv_dri_options[] = {
       DRI_CONF_VK_XWAYLAND_WAIT_READY(true)
       DRI_CONF_ANV_ASSUME_FULL_SUBGROUPS(false)
       DRI_CONF_ANV_SAMPLE_MASK_OUT_OPENGL_BEHAVIOUR(false)
+      DRI_CONF_ANV_FP64_WORKAROUND_ENABLED(false)
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_DEBUG
@@ -183,7 +184,7 @@ get_device_extensions(const struct anv_physical_device *device,
       (device->sync_syncobj_type.features & VK_SYNC_FEATURE_CPU_WAIT) != 0;
 
    const bool nv_mesh_shading_enabled =
-      env_var_as_boolean("ANV_EXPERIMENTAL_NV_MESH_SHADER", false);
+      debug_get_bool_option("ANV_EXPERIMENTAL_NV_MESH_SHADER", false);
 
    *ext = (struct vk_device_extension_table) {
       .KHR_8bit_storage                      = true,
@@ -278,6 +279,7 @@ get_device_extensions(const struct anv_physical_device *device,
 #endif
       .EXT_extended_dynamic_state            = true,
       .EXT_extended_dynamic_state2           = true,
+      .EXT_extended_dynamic_state3           = true,
       .EXT_external_memory_dma_buf           = true,
       .EXT_external_memory_host              = true,
       .EXT_fragment_shader_interlock         = true,
@@ -683,10 +685,10 @@ anv_physical_device_init_queue_families(struct anv_physical_device *pdevice)
                              INTEL_ENGINE_CLASS_RENDER);
       int g_count = 0;
       int c_count = 0;
-      if (env_var_as_boolean("INTEL_COMPUTE_CLASS", false))
+      if (debug_get_bool_option("INTEL_COMPUTE_CLASS", false))
          c_count = intel_engines_count(pdevice->engine_info,
                                        INTEL_ENGINE_CLASS_COMPUTE);
-      enum drm_i915_gem_engine_class compute_class =
+      enum intel_engine_class compute_class =
          c_count < 1 ? INTEL_ENGINE_CLASS_RENDER : INTEL_ENGINE_CLASS_COMPUTE;
 
       anv_override_engine_counts(&gc_count, &g_count, &c_count);
@@ -899,11 +901,18 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->supports_48bit_addresses =
       device->gtt_size > (4ULL << 30 /* GiB */);
 
+   /* We currently only have the right bits for instructions in Gen12+. If the
+    * kernel ever starts supporting that feature on previous generations,
+    * we'll need to edit genxml prior to enabling here.
+    */
+   device->has_protected_contexts = device->info.ver >= 12 &&
+      intel_gem_supports_protected_context(fd);
+
    result = anv_physical_device_init_heaps(device, fd);
    if (result != VK_SUCCESS)
       goto fail_base;
 
-   if (env_var_as_boolean("ANV_QUEUE_THREAD_DISABLE", false))
+   if (debug_get_bool_option("ANV_QUEUE_THREAD_DISABLE", false))
       device->has_exec_timeline = false;
 
    unsigned st_idx = 0;
@@ -928,10 +937,10 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    device->vk.pipeline_cache_import_ops = anv_cache_import_ops;
 
    device->always_use_bindless =
-      env_var_as_boolean("ANV_ALWAYS_BINDLESS", false);
+      debug_get_bool_option("ANV_ALWAYS_BINDLESS", false);
 
    device->use_call_secondary =
-      !env_var_as_boolean("ANV_DISABLE_SECONDARY_CMD_BUFFER_CALLS", false);
+      !debug_get_bool_option("ANV_DISABLE_SECONDARY_CMD_BUFFER_CALLS", false);
 
    device->has_implicit_ccs = device->info.has_aux_map ||
                               device->info.verx10 >= 125;
@@ -984,16 +993,7 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
 
    get_device_extensions(device, &device->vk.supported_extensions);
 
-   result = anv_init_wsi(device);
-   if (result != VK_SUCCESS)
-      goto fail_perf;
-
-   anv_measure_device_init(device);
-
-   anv_genX(&device->info, init_physical_device_state)(device);
-
-   *out = &device->vk;
-
+   /* Gather major/minor before WSI. */
    struct stat st;
 
    if (stat(primary_path, &st) == 0) {
@@ -1015,6 +1015,16 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
       device->local_major = 0;
       device->local_minor = 0;
    }
+
+   result = anv_init_wsi(device);
+   if (result != VK_SUCCESS)
+      goto fail_perf;
+
+   anv_measure_device_init(device);
+
+   anv_genX(&device->info, init_physical_device_state)(device);
+
+   *out = &device->vk;
 
    return VK_SUCCESS;
 
@@ -1086,6 +1096,8 @@ anv_init_dri_options(struct anv_instance *instance)
             driQueryOptionb(&instance->dri_options, "anv_sample_mask_out_opengl_behaviour");
     instance->lower_depth_range_rate =
             driQueryOptionf(&instance->dri_options, "lower_depth_range_rate");
+    instance->fp64_workaround_enabled =
+            driQueryOptionb(&instance->dri_options, "fp64_workaround_enabled");
 }
 
 VkResult anv_CreateInstance(
@@ -1581,7 +1593,7 @@ void anv_GetPhysicalDeviceFeatures2(
          features->rayTracingPipelineShaderGroupHandleCaptureReplay = false;
          features->rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false;
          features->rayTracingPipelineTraceRaysIndirect = true;
-         features->rayTraversalPrimitiveCulling = false;
+         features->rayTraversalPrimitiveCulling = true;
          break;
       }
 
@@ -1613,15 +1625,15 @@ void anv_GetPhysicalDeviceFeatures2(
 
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_2_FEATURES_EXT: {
          VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT *features = (void *)ext;
-         features->shaderBufferFloat16Atomics      = false;
+         features->shaderBufferFloat16Atomics      = pdevice->info.has_lsc;
          features->shaderBufferFloat16AtomicAdd    = false;
-         features->shaderBufferFloat16AtomicMinMax = false;
+         features->shaderBufferFloat16AtomicMinMax = pdevice->info.has_lsc;
          features->shaderBufferFloat32AtomicMinMax = true;
          features->shaderBufferFloat64AtomicMinMax =
             pdevice->info.has_64bit_float && pdevice->info.has_lsc;
-         features->shaderSharedFloat16Atomics      = false;
+         features->shaderSharedFloat16Atomics      = pdevice->info.has_lsc;
          features->shaderSharedFloat16AtomicAdd    = false;
-         features->shaderSharedFloat16AtomicMinMax = false;
+         features->shaderSharedFloat16AtomicMinMax = pdevice->info.has_lsc;
          features->shaderSharedFloat32AtomicMinMax = true;
          features->shaderSharedFloat64AtomicMinMax = false;
          features->shaderImageFloat32AtomicMinMax  = false;
@@ -1711,6 +1723,45 @@ void anv_GetPhysicalDeviceFeatures2(
          features->extendedDynamicState2 = true;
          features->extendedDynamicState2LogicOp = true;
          features->extendedDynamicState2PatchControlPoints = false;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT: {
+         VkPhysicalDeviceExtendedDynamicState3FeaturesEXT *features =
+            (VkPhysicalDeviceExtendedDynamicState3FeaturesEXT *)ext;
+         features->extendedDynamicState3PolygonMode = true;
+         features->extendedDynamicState3TessellationDomainOrigin = true;
+         features->extendedDynamicState3RasterizationStream = true;
+         features->extendedDynamicState3LineStippleEnable = true;
+         features->extendedDynamicState3LineRasterizationMode = true;
+         features->extendedDynamicState3LogicOpEnable = true;
+         features->extendedDynamicState3AlphaToOneEnable = true;
+         features->extendedDynamicState3DepthClipEnable = true;
+         features->extendedDynamicState3DepthClampEnable = true;
+         features->extendedDynamicState3DepthClipNegativeOneToOne = true;
+         features->extendedDynamicState3ProvokingVertexMode = true;
+         features->extendedDynamicState3ColorBlendEnable = true;
+         features->extendedDynamicState3ColorWriteMask = true;
+         features->extendedDynamicState3ColorBlendEquation = true;
+         features->extendedDynamicState3SampleMask = true;
+
+         features->extendedDynamicState3RasterizationSamples = false;
+         features->extendedDynamicState3AlphaToCoverageEnable = false;
+         features->extendedDynamicState3ConservativeRasterizationMode = false;
+         features->extendedDynamicState3ExtraPrimitiveOverestimationSize = false;
+         features->extendedDynamicState3SampleLocationsEnable = false;
+         features->extendedDynamicState3ViewportWScalingEnable = false;
+         features->extendedDynamicState3ViewportSwizzle = false;
+         features->extendedDynamicState3ShadingRateImageEnable = false;
+         features->extendedDynamicState3CoverageToColorEnable = false;
+         features->extendedDynamicState3CoverageToColorLocation = false;
+         features->extendedDynamicState3CoverageModulationMode = false;
+         features->extendedDynamicState3CoverageModulationTableEnable = false;
+         features->extendedDynamicState3CoverageModulationTable = false;
+         features->extendedDynamicState3CoverageReductionMode = false;
+         features->extendedDynamicState3RepresentativeFragmentTestEnable = false;
+         features->extendedDynamicState3ColorBlendAdvanced = false;
+
          break;
       }
 
@@ -3208,8 +3259,16 @@ VkResult anv_CreateDevice(
       return vk_error(physical_device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    struct vk_device_dispatch_table dispatch_table;
+
+   bool override_initial_entrypoints = true;
+   if (physical_device->instance->vk.app_info.app_name &&
+       !strcmp(physical_device->instance->vk.app_info.app_name, "HITMAN3.exe")) {
+      vk_device_dispatch_table_from_entrypoints(&dispatch_table, &hitman3_device_entrypoints, true);
+      override_initial_entrypoints = false;
+   }
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
-      anv_genX(&physical_device->info, device_entrypoints), true);
+      anv_genX(&physical_device->info, device_entrypoints),
+      override_initial_entrypoints);
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
       &anv_device_entrypoints, false);
    vk_device_dispatch_table_from_entrypoints(&dispatch_table,
@@ -3531,6 +3590,11 @@ VkResult anv_CreateDevice(
       result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto fail_default_pipeline_cache;
    }
+
+   /* The device (currently is ICL/TGL) does not have float64 support. */
+   if (!device->info->has_64bit_float &&
+      device->physical->instance->fp64_workaround_enabled)
+      anv_load_fp64_shader(device);
 
    result = anv_device_init_rt_shaders(device);
    if (result != VK_SUCCESS) {

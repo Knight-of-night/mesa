@@ -545,27 +545,6 @@ err_free_usc_pixel_program:
    return result;
 }
 
-static uint32_t pvr_get_hw_clear_color(VkFormat vk_format,
-                                       const VkClearValue *clear_value)
-{
-   union util_color uc = { .ui = 0 };
-
-   switch (vk_format) {
-   case VK_FORMAT_B8G8R8A8_UNORM:
-      util_pack_color(clear_value->color.float32,
-                      PIPE_FORMAT_R8G8B8A8_UNORM,
-                      &uc);
-      break;
-
-   default:
-      assert(!"Unsupported format");
-      uc.ui[0] = 0;
-      break;
-   }
-
-   return uc.ui[0];
-}
-
 static VkResult
 pvr_load_op_constants_create_and_upload(struct pvr_cmd_buffer *cmd_buffer,
                                         const struct pvr_load_op *load_op,
@@ -581,7 +560,7 @@ pvr_load_op_constants_create_and_upload(struct pvr_cmd_buffer *cmd_buffer,
       &pass->attachments[color_init->index];
    const VkClearValue *clear_value =
       &render_pass_info->clear_values[color_init->index];
-   uint32_t hw_clear_value;
+   uint32_t hw_clear_value[PVR_CLEAR_COLOR_ARRAY_SIZE];
    struct pvr_bo *clear_bo;
    VkResult result;
 
@@ -594,10 +573,15 @@ pvr_load_op_constants_create_and_upload(struct pvr_cmd_buffer *cmd_buffer,
    assert(color_init->op == VK_ATTACHMENT_LOAD_OP_CLEAR);
 
    /* FIXME: do this at the point we store the clear values? */
-   hw_clear_value = pvr_get_hw_clear_color(attachment->vk_format, clear_value);
+   pvr_get_hw_clear_color(attachment->vk_format,
+                          clear_value->color,
+                          hw_clear_value);
+
+   if (vk_format_get_blocksize(attachment->vk_format) > 4)
+      pvr_finishme("Handle clear color greater than 32 bits.");
 
    result = pvr_cmd_buffer_upload_general(cmd_buffer,
-                                          &hw_clear_value,
+                                          &hw_clear_value[0],
                                           sizeof(hw_clear_value),
                                           &clear_bo);
    if (result != VK_SUCCESS)
@@ -1667,6 +1651,7 @@ static VkResult pvr_cmd_buffer_start_sub_cmd(struct pvr_cmd_buffer *cmd_buffer,
 
    pvr_cmd_buffer_update_barriers(cmd_buffer, type);
 
+   /* TODO: Add proper support for joining consecutive event sub_cmd? */
    if (state->current_sub_cmd) {
       if (state->current_sub_cmd->type == type) {
          /* Continue adding to the current sub command. */
@@ -1729,7 +1714,6 @@ static VkResult pvr_cmd_buffer_start_sub_cmd(struct pvr_cmd_buffer *cmd_buffer,
       break;
 
    case PVR_SUB_CMD_TYPE_EVENT:
-      /* TODO: Add support for joining consecutive event sub_cmd? */
       break;
 
    default:
@@ -5831,8 +5815,12 @@ pvr_execute_graphics_cmd_buffer(struct pvr_cmd_buffer *cmd_buffer,
          if (result != VK_SUCCESS)
             return;
 
-         pvr_csb_copy(&primary_sub_cmd->gfx.control_stream,
-                      &sec_sub_cmd->gfx.control_stream);
+         result = pvr_csb_copy(&primary_sub_cmd->gfx.control_stream,
+                               &sec_sub_cmd->gfx.control_stream);
+         if (result != VK_SUCCESS) {
+            cmd_buffer->state.status = result;
+            return;
+         }
       } else {
          result = pvr_execute_deferred_cmd_buffer(cmd_buffer, sec_cmd_buffer);
          if (result != VK_SUCCESS)
@@ -6192,18 +6180,59 @@ static bool pvr_is_stencil_store_load_needed(
    return false;
 }
 
-static void pvr_insert_mid_frag_barrier(struct pvr_cmd_buffer *cmd_buffer)
+static VkResult
+pvr_cmd_buffer_insert_mid_frag_barrier_event(struct pvr_cmd_buffer *cmd_buffer,
+                                             uint32_t src_stage_mask,
+                                             uint32_t dst_stage_mask)
 {
-   struct pvr_sub_cmd *const curr_sub_cmd = cmd_buffer->state.current_sub_cmd;
+   struct pvr_sub_cmd_event *sub_cmd;
+   VkResult result;
 
-   assert(curr_sub_cmd->type == PVR_SUB_CMD_TYPE_GRAPHICS);
+   assert(cmd_buffer->state.current_sub_cmd->type == PVR_SUB_CMD_TYPE_GRAPHICS);
+
+   cmd_buffer->state.current_sub_cmd->gfx.empty_cmd = false;
 
    pvr_finishme("Handle mid frag barrier stencil store.");
+
+   pvr_cmd_buffer_end_sub_cmd(cmd_buffer);
+   result = pvr_cmd_buffer_start_sub_cmd(cmd_buffer, PVR_SUB_CMD_TYPE_EVENT);
+   if (result != VK_SUCCESS)
+      return result;
+
+   sub_cmd = &cmd_buffer->state.current_sub_cmd->event;
+
+   sub_cmd->type = PVR_EVENT_TYPE_BARRIER;
+   sub_cmd->barrier.in_render_pass = true;
+   sub_cmd->barrier.wait_for_stage_mask = src_stage_mask;
+   sub_cmd->barrier.wait_at_stage_mask = dst_stage_mask;
 
    pvr_cmd_buffer_end_sub_cmd(cmd_buffer);
    pvr_cmd_buffer_start_sub_cmd(cmd_buffer, PVR_SUB_CMD_TYPE_GRAPHICS);
 
    pvr_finishme("Handle mid frag barrier color attachment load.");
+
+   return VK_SUCCESS;
+}
+
+static VkResult
+pvr_cmd_buffer_insert_barrier_event(struct pvr_cmd_buffer *cmd_buffer,
+                                    uint32_t src_stage_mask,
+                                    uint32_t dst_stage_mask)
+{
+   struct pvr_sub_cmd_event *sub_cmd;
+   VkResult result;
+
+   result = pvr_cmd_buffer_start_sub_cmd(cmd_buffer, PVR_SUB_CMD_TYPE_EVENT);
+   if (result != VK_SUCCESS)
+      return result;
+
+   sub_cmd = &cmd_buffer->state.current_sub_cmd->event;
+
+   sub_cmd->type = PVR_EVENT_TYPE_BARRIER;
+   sub_cmd->barrier.wait_for_stage_mask = src_stage_mask;
+   sub_cmd->barrier.wait_at_stage_mask = dst_stage_mask;
+
+   return pvr_cmd_buffer_end_sub_cmd(cmd_buffer);
 }
 
 /* This is just enough to handle vkCmdPipelineBarrier().
@@ -6331,10 +6360,23 @@ void pvr_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                                        pDependencyInfo->pImageMemoryBarriers);
 
    if (is_stencil_store_load_needed) {
-      pvr_insert_mid_frag_barrier(cmd_buffer);
+      VkResult result;
+
+      result = pvr_cmd_buffer_insert_mid_frag_barrier_event(cmd_buffer,
+                                                            src_stage_mask,
+                                                            dst_stage_mask);
+      if (result != VK_SUCCESS)
+         mesa_loge("Failed to insert mid frag barrier event.");
    } else {
-      if (is_barrier_needed)
-         pvr_finishme("Insert barrier if needed.");
+      if (is_barrier_needed) {
+         VkResult result;
+
+         result = pvr_cmd_buffer_insert_barrier_event(cmd_buffer,
+                                                      src_stage_mask,
+                                                      dst_stage_mask);
+         if (result != VK_SUCCESS)
+            mesa_loge("Failed to insert pipeline barrier event.");
+      }
    }
 }
 

@@ -49,7 +49,7 @@
 #include "intel/common/intel_gem.h"
 #include "intel/ds/intel_tracepoints.h"
 #include "util/hash_table.h"
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "util/set.h"
 #include "util/u_upload_mgr.h"
 
@@ -239,7 +239,7 @@ iris_init_batch(struct iris_context *ice,
       batch->decoder.surface_base = IRIS_MEMZONE_BINDER_START;
       batch->decoder.max_vbo_decoded_lines = 32;
       if (batch->name == IRIS_BATCH_BLITTER)
-         batch->decoder.engine = I915_ENGINE_CLASS_COPY;
+         batch->decoder.engine = INTEL_ENGINE_CLASS_COPY;
    }
 
    iris_init_batch_measure(ice, batch);
@@ -255,7 +255,7 @@ iris_init_non_engine_contexts(struct iris_context *ice, int priority)
    struct iris_screen *screen = (void *) ice->ctx.screen;
 
    iris_foreach_batch(ice, batch) {
-      batch->ctx_id = iris_create_hw_context(screen->bufmgr);
+      batch->ctx_id = iris_create_hw_context(screen->bufmgr, ice->protected);
       batch->exec_flags = I915_EXEC_RENDER;
       batch->has_engines_context = false;
       assert(batch->ctx_id);
@@ -292,7 +292,7 @@ iris_create_engines_context(struct iris_context *ice, int priority)
    /* Blitter is only supported on Gfx12+ */
    unsigned num_batches = IRIS_BATCH_COUNT - (devinfo->ver >= 12 ? 0 : 1);
 
-   if (env_var_as_boolean("INTEL_COMPUTE_CLASS", false) &&
+   if (debug_get_bool_option("INTEL_COMPUTE_CLASS", false) &&
        intel_engines_count(engines_info, INTEL_ENGINE_CLASS_COMPUTE) > 0)
       engine_classes[IRIS_BATCH_COMPUTE] = INTEL_ENGINE_CLASS_COMPUTE;
 

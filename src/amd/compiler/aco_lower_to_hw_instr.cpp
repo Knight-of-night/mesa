@@ -1019,20 +1019,21 @@ get_intersection_mask(int a_start, int a_size, int b_start, int b_size)
    return u_bit_consecutive(intersection_start, intersection_end - intersection_start) & mask;
 }
 
+/* src1 are bytes 0-3. dst/src0 are bytes 4-7. */
 void
-create_bperm(Builder& bld, uint8_t swiz[4], Definition dst, Operand src0,
-             Operand src1 = Operand(v1))
+create_bperm(Builder& bld, uint8_t swiz[4], Definition dst, Operand src1,
+             Operand src0 = Operand(v1))
 {
    uint32_t swiz_packed =
       swiz[0] | ((uint32_t)swiz[1] << 8) | ((uint32_t)swiz[2] << 16) | ((uint32_t)swiz[3] << 24);
 
    dst = Definition(PhysReg(dst.physReg().reg()), v1);
-   if (!src0.isConstant())
-      src0 = Operand(PhysReg(src0.physReg().reg()), v1);
-   if (src1.isUndefined())
-      src1 = Operand(dst.physReg(), v1);
-   else if (!src1.isConstant())
+   if (!src1.isConstant())
       src1 = Operand(PhysReg(src1.physReg().reg()), v1);
+   if (src0.isUndefined())
+      src0 = Operand(dst.physReg(), v1);
+   else if (!src0.isConstant())
+      src0 = Operand(PhysReg(src0.physReg().reg()), v1);
    bld.vop3(aco_opcode::v_perm_b32, dst, src0, src1, Operand::c32(swiz_packed));
 }
 
@@ -2223,6 +2224,8 @@ lower_to_hw_instr(Program* program)
                   } else if (offset == 0 && signext && (bits == 8 || bits == 16)) {
                      bld.sop1(bits == 8 ? aco_opcode::s_sext_i32_i8 : aco_opcode::s_sext_i32_i16,
                               dst, op);
+                  } else if (ctx.program->gfx_level >= GFX9 && offset == 0 && bits == 16) {
+                     bld.sop2(aco_opcode::s_pack_ll_b32_b16, dst, op, Operand::zero());
                   } else {
                      bld.sop2(signext ? aco_opcode::s_bfe_i32 : aco_opcode::s_bfe_u32, dst,
                               bld.def(s1, scc), op, Operand::c32((bits << 16) | offset));
@@ -2377,6 +2380,54 @@ lower_to_hw_instr(Program* program)
                bld.sop1(aco_opcode::s_setpc_b64, instr->operands[0]);
                break;
             }
+            case aco_opcode::p_interp_gfx11: {
+               assert(instr->definitions[0].regClass() == v1 ||
+                      instr->definitions[0].regClass() == v2b);
+               assert(instr->definitions[1].regClass() == bld.lm);
+               assert(instr->operands[0].regClass() == v1.as_linear());
+               assert(instr->operands[1].isConstant());
+               assert(instr->operands[2].isConstant());
+               assert(instr->operands.back().physReg() == m0);
+               Definition dst = instr->definitions[0];
+               PhysReg exec_tmp = instr->definitions[1].physReg();
+               PhysReg lin_vgpr = instr->operands[0].physReg();
+               unsigned attribute = instr->operands[1].constantValue();
+               unsigned component = instr->operands[2].constantValue();
+               uint16_t dpp_ctrl = 0;
+               Operand coord1, coord2;
+               if (instr->operands.size() == 6) {
+                  assert(instr->operands[3].regClass() == v1);
+                  assert(instr->operands[4].regClass() == v1);
+                  coord1 = instr->operands[3];
+                  coord2 = instr->operands[4];
+               } else {
+                  assert(instr->operands[3].isConstant());
+                  dpp_ctrl = instr->operands[3].constantValue();
+               }
+
+               bld.sop1(Builder::s_mov, Definition(exec_tmp, bld.lm), Operand(exec, bld.lm));
+               bld.sop1(Builder::s_wqm, Definition(exec, bld.lm), Operand(exec, bld.lm));
+               bld.ldsdir(aco_opcode::lds_param_load, Definition(lin_vgpr, v1), Operand(m0, s1),
+                          attribute, component);
+               bld.sop1(Builder::s_mov, Definition(exec, bld.lm), Operand(exec_tmp, bld.lm));
+
+               Operand p(lin_vgpr, v1);
+               Operand dst_op(dst.physReg(), v1);
+               if (instr->operands.size() == 5) {
+                  bld.vop1_dpp(aco_opcode::v_mov_b32, Definition(dst), p, dpp_ctrl);
+               } else if (dst.regClass() == v2b) {
+                  bld.vinterp_inreg(aco_opcode::v_interp_p10_f16_f32_inreg, Definition(dst), p,
+                                    coord1, p);
+                  bld.vinterp_inreg(aco_opcode::v_interp_p2_f16_f32_inreg, Definition(dst), p,
+                                    coord2, dst_op);
+               } else {
+                  bld.vinterp_inreg(aco_opcode::v_interp_p10_f32_inreg, Definition(dst), p, coord1,
+                                    p);
+                  bld.vinterp_inreg(aco_opcode::v_interp_p2_f32_inreg, Definition(dst), p, coord2,
+                                    dst_op);
+               }
+               break;
+            }
             default: break;
             }
          } else if (instr->isBranch()) {
@@ -2426,7 +2477,7 @@ lower_to_hw_instr(Program* program)
                         can_remove = false;
                   } else if (inst->isSALU()) {
                      num_scalar++;
-                  } else if (inst->isVALU() || inst->isVINTRP() || instr->isVINTERP_INREG()) {
+                  } else if (inst->isVALU() || inst->isVINTRP() || inst->isVINTERP_INREG()) {
                      num_vector++;
                      /* VALU which writes SGPRs are always executed on GFX10+ */
                      if (ctx.program->gfx_level >= GFX10) {

@@ -25,7 +25,8 @@
 #define BVH_BVH_H
 
 #define radv_bvh_node_triangle 0
-#define radv_bvh_node_internal 5
+#define radv_bvh_node_box16    4
+#define radv_bvh_node_box32    5
 #define radv_bvh_node_instance 6
 #define radv_bvh_node_aabb 7
 
@@ -39,12 +40,28 @@
 #else
 #include <vulkan/vulkan.h>
 typedef struct radv_ir_node radv_ir_node;
+typedef struct radv_global_sync_data radv_global_sync_data;
+
+typedef uint16_t float16_t;
 
 typedef struct {
    float values[3][4];
 } mat3x4;
 
+typedef struct {
+   float x;
+   float y;
+   float z;
+} vec3;
+
+typedef struct radv_aabb radv_aabb;
+
 #endif
+
+struct radv_aabb {
+   vec3 min;
+   vec3 max;
+};
 
 struct radv_accel_struct_serialization_header {
    uint8_t driver_uuid[VK_UUID_SIZE];
@@ -66,7 +83,7 @@ struct radv_accel_struct_geometry_info {
 struct radv_accel_struct_header {
    uint32_t bvh_offset;
    uint32_t reserved;
-   float aabb[2][3];
+   radv_aabb aabb;
 
    /* Everything after this gets updated/copied from the CPU. */
    uint64_t compacted_size;
@@ -77,11 +94,10 @@ struct radv_accel_struct_header {
    uint64_t instance_count;
    uint64_t size;
    uint32_t build_flags;
-   uint32_t internal_node_count;
 };
 
 struct radv_ir_node {
-   float aabb[2][3];
+   radv_aabb aabb;
 };
 
 #define FINAL_TREE_PRESENT 0
@@ -117,6 +133,28 @@ struct radv_ir_instance_node {
    uint32_t instance_id;
 };
 
+struct radv_global_sync_data {
+   uint32_t task_counts[2];
+   uint32_t task_started_counter;
+   uint32_t task_done_counter;
+   uint32_t current_phase_start_counter;
+   uint32_t current_phase_end_counter;
+   uint32_t phase_index;
+};
+
+struct radv_ir_header {
+   int32_t min_bounds[3];
+   int32_t max_bounds[3];
+   uint32_t active_leaf_count;
+   /* Indirect dispatch dimensions for the internal node converter.
+    * ir_internal_node_count is the thread count in the X dimension,
+    * while Y and Z are always set to 1. */
+   uint32_t ir_internal_node_count;
+   uint32_t dispatch_size_y;
+   uint32_t dispatch_size_z;
+   radv_global_sync_data sync_data;
+};
+
 struct radv_bvh_triangle_node {
    float coords[3][3];
    uint32_t reserved[3];
@@ -128,7 +166,7 @@ struct radv_bvh_triangle_node {
 };
 
 struct radv_bvh_aabb_node {
-   float aabb[2][3];
+   radv_aabb aabb;
    uint32_t primitive_id;
    /* flags in upper 4 bits */
    uint32_t geometry_id_and_flags;
@@ -154,17 +192,20 @@ struct radv_bvh_instance_node {
 
 struct radv_bvh_box16_node {
    uint32_t children[4];
-   uint32_t coords[4][3];
+   float16_t coords[4][2][3];
 };
 
 struct radv_bvh_box32_node {
    uint32_t children[4];
-   float coords[4][2][3];
+   radv_aabb coords[4];
    uint32_t reserved[4];
 };
 
-/* a box32 node */
-#define RADV_BVH_ROOT_NODE radv_bvh_node_internal
+#define RADV_BVH_ROOT_NODE radv_bvh_node_box32
 #define RADV_BVH_INVALID_NODE 0xffffffffu
+
+/* If the task index is set to this value, there is no
+ * more work to do. */
+#define TASK_INDEX_INVALID 0xFFFFFFFF
 
 #endif

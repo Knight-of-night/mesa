@@ -36,7 +36,7 @@
 #include "genxml/genX_bits.h"
 #include "perf/intel_perf.h"
 
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "util/perf/u_trace.h"
 
 /** \file anv_batch_chain.c
@@ -1019,7 +1019,7 @@ anv_cmd_buffer_end_batch_buffer(struct anv_cmd_buffer *cmd_buffer)
           */
          if (cmd_buffer->batch_bos.next == cmd_buffer->batch_bos.prev) {
             const struct intel_device_info *devinfo = cmd_buffer->device->info;
-            const enum drm_i915_gem_engine_class engine_class = cmd_buffer->queue_family->engine_class;
+            const enum intel_engine_class engine_class = cmd_buffer->queue_family->engine_class;
             /* Careful to have everything in signed integer. */
             int32_t prefetch_len = devinfo->engine_class_prefetch[engine_class];
             int batch_len = cmd_buffer->batch.next - cmd_buffer->batch.start;
@@ -1510,7 +1510,7 @@ execbuf_can_skip_relocations(struct anv_execbuf *exec)
 
    static int userspace_relocs = -1;
    if (userspace_relocs < 0)
-      userspace_relocs = env_var_as_boolean("ANV_USERSPACE_RELOCS", true);
+      userspace_relocs = debug_get_bool_option("ANV_USERSPACE_RELOCS", true);
    if (!userspace_relocs)
       return false;
 

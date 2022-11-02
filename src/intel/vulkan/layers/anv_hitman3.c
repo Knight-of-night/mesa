@@ -1,5 +1,5 @@
 /*
- * Copyright © 2015 Intel Corporation
+ * Copyright © 2022 Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -21,37 +21,21 @@
  * IN THE SOFTWARE.
  */
 
-#ifndef _UTIL_DEBUG_H
-#define _UTIL_DEBUG_H
+#include "anv_private.h"
 
-#include <stdint.h>
-#include <stdbool.h>
+VkResult
+hitman3_CreateBufferView(VkDevice _device,
+                         const VkBufferViewCreateInfo *pCreateInfo,
+                         const VkAllocationCallbacks *pAllocator,
+                         VkBufferView *pView)
+{
+   ANV_FROM_HANDLE(anv_buffer, buffer, pCreateInfo->buffer);
+   if (pCreateInfo->format == VK_FORMAT_R32G32B32_SFLOAT &&
+       (buffer->vk.usage & VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT)) {
+      ANV_FROM_HANDLE(anv_device, device, _device);
+      return vk_errorf(device, VK_ERROR_UNKNOWN,
+                       "invalid image format requested for storage");
+   }
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-struct debug_control {
-    const char * string;
-    uint64_t     flag;
-};
-
-uint64_t
-parse_debug_string(const char *debug,
-                   const struct debug_control *control);
-uint64_t
-parse_enable_string(const char *debug,
-                    uint64_t default_value,
-                    const struct debug_control *control);
-bool
-comma_separated_list_contains(const char *list, const char *s);
-bool
-env_var_as_boolean(const char *var_name, bool default_value);
-unsigned
-env_var_as_unsigned(const char *var_name, unsigned default_value);
-
-#ifdef __cplusplus
-} /* extern C */
-#endif
-
-#endif /* _UTIL_DEBUG_H */
+   return anv_CreateBufferView(_device, pCreateInfo, pAllocator, pView);
+}

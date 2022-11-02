@@ -37,7 +37,7 @@
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
-#include "util/debug.h"
+#include "util/u_debug.h"
 #include "util/os_file.h"
 #include "util/u_cpu_detect.h"
 #include "util/u_inlines.h"
@@ -115,7 +115,7 @@ iris_enable_clover()
 {
    static int enable = -1;
    if (enable < 0)
-      enable = env_var_as_boolean("IRIS_ENABLE_CLOVER", false);
+      enable = debug_get_bool_option("IRIS_ENABLE_CLOVER", false);
    return enable;
 }
 
@@ -192,7 +192,6 @@ iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    switch (param) {
    case PIPE_CAP_NPOT_TEXTURES:
    case PIPE_CAP_ANISOTROPIC_FILTER:
-   case PIPE_CAP_POINT_SPRITE:
    case PIPE_CAP_OCCLUSION_QUERY:
    case PIPE_CAP_QUERY_TIME_ELAPSED:
    case PIPE_CAP_TEXTURE_SWIZZLE:
@@ -210,7 +209,6 @@ iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_DEPTH_CLIP_DISABLE:
    case PIPE_CAP_VS_INSTANCEID:
    case PIPE_CAP_VERTEX_ELEMENT_INSTANCE_DIVISOR:
-   case PIPE_CAP_MIXED_COLORBUFFER_FORMATS:
    case PIPE_CAP_SEAMLESS_CUBE_MAP:
    case PIPE_CAP_SEAMLESS_CUBE_MAP_PER_TEXTURE:
    case PIPE_CAP_CONDITIONAL_RENDER:
@@ -224,7 +222,6 @@ iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_CUBE_MAP_ARRAY:
    case PIPE_CAP_TEXTURE_BUFFER_OBJECTS:
    case PIPE_CAP_QUERY_PIPELINE_STATISTICS_SINGLE:
-   case PIPE_CAP_BUFFER_MAP_PERSISTENT_COHERENT:
    case PIPE_CAP_TEXTURE_QUERY_LOD:
    case PIPE_CAP_SAMPLE_SHADING:
    case PIPE_CAP_FORCE_PERSAMPLE_INTERP:
@@ -360,12 +357,17 @@ iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_VENDOR_ID:
       return 0x8086;
    case PIPE_CAP_DEVICE_ID:
-      return screen->pci_id;
+      return screen->devinfo.pci_device_id;
    case PIPE_CAP_VIDEO_MEMORY:
       return iris_get_video_memory(screen);
    case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
    case PIPE_CAP_MAX_VARYINGS:
       return 32;
+   case PIPE_CAP_PREFER_IMM_ARRAYS_AS_CONSTBUF:
+      /* We want immediate arrays to go get uploaded as nir->constant_data by
+       * nir_opt_large_constants() instead.
+       */
+      return 0;
    case PIPE_CAP_RESOURCE_FROM_USER_MEMORY:
       /* AMD_pinned_memory assumes the flexibility of using client memory
        * for any buffer (incl. vertex buffers) which rules out the prospect
@@ -409,6 +411,9 @@ iris_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 
    case PIPE_CAP_QUERY_TIMESTAMP_BITS:
       return TIMESTAMP_BITS;
+
+   case PIPE_CAP_DEVICE_PROTECTED_CONTEXT:
+      return screen->kernel_features & KERNEL_HAS_PROTECTED_CONTEXT;
 
    default:
       return u_pipe_screen_get_param_defaults(pscreen, param);
@@ -749,6 +754,8 @@ iris_detect_kernel_features(struct iris_screen *screen)
    /* Kernel 5.2+ */
    if (intel_gem_supports_syncobj_wait(screen->fd))
       screen->kernel_features |= KERNEL_HAS_WAIT_FOR_SUBMIT;
+   if (intel_gem_supports_protected_context(screen->fd))
+      screen->kernel_features |= KERNEL_HAS_PROTECTED_CONTEXT;
 }
 
 static bool
@@ -784,7 +791,6 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
 
    if (!intel_get_device_info_from_fd(fd, &screen->devinfo))
       return NULL;
-   screen->pci_id = screen->devinfo.pci_device_id;
 
    p_atomic_set(&screen->refcount, 1);
 
@@ -852,7 +858,7 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
    screen->driconf.lower_depth_range_rate =
       driQueryOptionf(config->options, "lower_depth_range_rate");
 
-   screen->precompile = env_var_as_boolean("shader_precompile", true);
+   screen->precompile = debug_get_bool_option("shader_precompile", true);
 
    isl_device_init(&screen->isl_dev, &screen->devinfo);
 
