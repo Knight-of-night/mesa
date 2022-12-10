@@ -220,7 +220,7 @@ vk_device_init(struct vk_device *device,
 }
 
 void
-vk_device_finish(UNUSED struct vk_device *device)
+vk_device_finish(struct vk_device *device)
 {
    /* Drivers should tear down their own queues */
    assert(list_is_empty(&device->queues));
@@ -420,6 +420,21 @@ vk_common_GetDeviceQueue2(VkDevice _device,
       *pQueue = vk_queue_to_handle(queue);
    else
       *pQueue = VK_NULL_HANDLE;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_GetDeviceGroupPeerMemoryFeatures(
+   VkDevice device,
+   uint32_t heapIndex,
+   uint32_t localDeviceIndex,
+   uint32_t remoteDeviceIndex,
+   VkPeerMemoryFeatureFlags *pPeerMemoryFeatures)
+{
+   assert(localDeviceIndex == 0 && remoteDeviceIndex == 0);
+   *pPeerMemoryFeatures = VK_PEER_MEMORY_FEATURE_COPY_SRC_BIT |
+                          VK_PEER_MEMORY_FEATURE_COPY_DST_BIT |
+                          VK_PEER_MEMORY_FEATURE_GENERIC_SRC_BIT |
+                          VK_PEER_MEMORY_FEATURE_GENERIC_DST_BIT;
 }
 
 VKAPI_ATTR void VKAPI_CALL

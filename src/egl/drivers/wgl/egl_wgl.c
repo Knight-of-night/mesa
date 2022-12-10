@@ -21,6 +21,8 @@
  * IN THE SOFTWARE.
  */
 
+#include "state_tracker/st_context.h"
+
 #include <egldriver.h>
 #include <egllog.h>
 #include <eglcurrent.h>
@@ -35,6 +37,7 @@
 #include <stw_framebuffer.h>
 #include <stw_image.h>
 #include <stw_winsys.h>
+#include <stw_ext_interop.h>
 
 #include <GL/wglext.h>
 
@@ -44,6 +47,8 @@
 
 #include <mapi/glapi/glapi.h>
 #include "util/u_call_once.h"
+
+#include <GL/mesa_glinterop.h>
 
 static EGLBoolean
 wgl_match_config(const _EGLConfig *conf, const _EGLConfig *criteria)
@@ -189,20 +194,20 @@ static void
 wgl_display_destroy(_EGLDisplay *disp)
 {
    struct wgl_egl_display *wgl_dpy = wgl_egl_display(disp);
-   if (wgl_dpy->base.destroy)
-      wgl_dpy->base.destroy(&wgl_dpy->base);
+
+   st_screen_destroy(&wgl_dpy->base);
    free(wgl_dpy);
 }
 
 static int
-wgl_egl_st_get_param(struct st_manager *smapi, enum st_manager_param param)
+wgl_egl_st_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param param)
 {
    /* no-op */
    return 0;
 }
 
 static bool
-wgl_get_egl_image(struct st_manager *smapi, void *image, struct st_egl_image *out)
+wgl_get_egl_image(struct pipe_frontend_screen *fscreen, void *image, struct st_egl_image *out)
 {
    struct wgl_egl_image *wgl_img = (struct wgl_egl_image *)image;
    stw_translate_image(wgl_img->img, out);
@@ -210,9 +215,9 @@ wgl_get_egl_image(struct st_manager *smapi, void *image, struct st_egl_image *ou
 }
 
 static bool
-wgl_validate_egl_image(struct st_manager *smapi, void *image)
+wgl_validate_egl_image(struct pipe_frontend_screen *fscreen, void *image)
 {
-   struct wgl_egl_display *wgl_dpy = (struct wgl_egl_display *)smapi;
+   struct wgl_egl_display *wgl_dpy = (struct wgl_egl_display *)fscreen;
    _EGLDisplay *disp = _eglLockDisplay(wgl_dpy->parent);
    _EGLImage *img = _eglLookupImage(image, disp);
    _eglUnlockDisplay(disp);
@@ -400,33 +405,8 @@ wgl_create_context(_EGLDisplay *disp, _EGLConfig *conf,
       return NULL;
    }
 
-   if (!_eglInitContext(&wgl_ctx->base, disp, conf, attrib_list))
+   if (!_eglInitContext(&wgl_ctx->base, disp, conf, share_list, attrib_list))
       goto cleanup;
-
-   /* The EGL_EXT_create_context_robustness spec says:
-    *
-    *    "Add to the eglCreateContext context creation errors: [...]
-    *
-    *     * If the reset notification behavior of <share_context> and the
-    *       newly created context are different then an EGL_BAD_MATCH error is
-    *       generated."
-    */
-   if (share_list && share_list->ResetNotificationStrategy !=
-      wgl_ctx->base.ResetNotificationStrategy) {
-      _eglError(EGL_BAD_MATCH, "eglCreateContext");
-      goto cleanup;
-   }
-
-   /* The EGL_KHR_create_context_no_error spec says:
-    *
-    *    "BAD_MATCH is generated if the value of EGL_CONTEXT_OPENGL_NO_ERROR_KHR
-    *    used to create <share_context> does not match the value of
-    *    EGL_CONTEXT_OPENGL_NO_ERROR_KHR for the context being created."
-    */
-   if (share_list && share_list->NoError != wgl_ctx->base.NoError) {
-      _eglError(EGL_BAD_MATCH, "eglCreateContext");
-      goto cleanup;
-   }
 
    unsigned profile_mask = 0;
    switch (wgl_ctx->base.ClientAPI) {
@@ -746,7 +726,6 @@ static EGLBoolean
 wgl_bind_tex_image(_EGLDisplay *disp, _EGLSurface *surf, EGLint buffer)
 {
    struct wgl_egl_surface *wgl_surf = wgl_egl_surface(surf);
-   enum st_attachment_type target = ST_TEXTURE_2D;
 
    _EGLContext *ctx = _eglGetCurrentContext();
    struct wgl_egl_context *wgl_ctx = wgl_egl_context(ctx);
@@ -754,7 +733,7 @@ wgl_bind_tex_image(_EGLDisplay *disp, _EGLSurface *surf, EGLint buffer)
    if (!_eglBindTexImage(disp, surf, buffer))
       return EGL_FALSE;
 
-   struct pipe_resource *pres = stw_get_framebuffer_resource(wgl_surf->fb->stfb, ST_ATTACHMENT_FRONT_LEFT);
+   struct pipe_resource *pres = stw_get_framebuffer_resource(wgl_surf->fb->drawable, ST_ATTACHMENT_FRONT_LEFT);
    enum pipe_format format = pres->format;
 
    switch (surf->TextureFormat) {
@@ -792,7 +771,8 @@ wgl_bind_tex_image(_EGLDisplay *disp, _EGLSurface *surf, EGLint buffer)
       assert(!"Unexpected texture target in wgl_bind_tex_image()");
    }
 
-   wgl_ctx->ctx->st->teximage(wgl_ctx->ctx->st, target, 0, format, pres, false);
+   st_context_teximage(wgl_ctx->ctx->st, GL_TEXTURE_2D, 0, format, pres,
+                       false);
 
    return EGL_TRUE;
 }
@@ -823,7 +803,7 @@ wgl_wait_client(_EGLDisplay *disp, _EGLContext *ctx)
 {
    struct wgl_egl_context *wgl_ctx = wgl_egl_context(ctx);
    struct pipe_fence_handle *fence = NULL;
-   wgl_ctx->ctx->st->flush(wgl_ctx->ctx->st, ST_FLUSH_END_OF_FRAME | ST_FLUSH_WAIT, &fence, NULL, NULL);
+   st_context_flush(wgl_ctx->ctx->st, ST_FLUSH_END_OF_FRAME | ST_FLUSH_WAIT, &fence, NULL, NULL);
    return EGL_TRUE;
 }
 
@@ -1000,7 +980,7 @@ wgl_create_sync_khr(_EGLDisplay *disp, EGLenum type, const EGLAttrib *attrib_lis
    struct wgl_egl_context *wgl_ctx = wgl_egl_context(ctx);
    struct wgl_egl_sync *wgl_sync;
 
-   struct st_context_iface *st_ctx = wgl_ctx ? wgl_ctx->ctx->st : NULL;
+   struct st_context *st = wgl_ctx ? wgl_ctx->ctx->st : NULL;
 
    wgl_sync = calloc(1, sizeof(struct wgl_egl_sync));
    if (!wgl_sync) {
@@ -1015,7 +995,7 @@ wgl_create_sync_khr(_EGLDisplay *disp, EGLenum type, const EGLAttrib *attrib_lis
 
    switch (type) {
    case EGL_SYNC_FENCE_KHR:
-      st_ctx->flush(st_ctx, 0, &wgl_sync->fence, NULL, NULL);
+      st_context_flush(st, 0, &wgl_sync->fence, NULL, NULL);
       if (!wgl_sync->fence) {
          _eglError(EGL_BAD_ALLOC, "eglCreateSyncKHR");
          free(wgl_sync);
@@ -1161,6 +1141,32 @@ wgl_query_driver_config(_EGLDisplay *disp)
    return stw_get_config_xml();
 }
 
+static int
+wgl_interop_query_device_info(_EGLDisplay *disp, _EGLContext *ctx,
+                              struct mesa_glinterop_device_info *out)
+{
+   struct wgl_egl_context *wgl_ctx = wgl_egl_context(ctx);
+   return stw_interop_query_device_info(wgl_ctx->ctx, out);
+}
+
+static int
+wgl_interop_export_object(_EGLDisplay *disp, _EGLContext *ctx,
+                          struct mesa_glinterop_export_in *in,
+                          struct mesa_glinterop_export_out *out)
+{
+   struct wgl_egl_context *wgl_ctx = wgl_egl_context(ctx);
+   return stw_interop_export_object(wgl_ctx->ctx, in, out);
+}
+
+static int
+wgl_interop_flush_objects(_EGLDisplay *disp, _EGLContext *ctx,
+                          unsigned count, struct mesa_glinterop_export_in *objects,
+                          GLsync *sync)
+{
+   struct wgl_egl_context *wgl_ctx = wgl_egl_context(ctx);
+   return stw_interop_flush_objects(wgl_ctx->ctx, count, objects, sync);
+}
+
 struct _egl_driver _eglDriver = {
    .Initialize = wgl_initialize,
    .Terminate = wgl_terminate,
@@ -1187,5 +1193,8 @@ struct _egl_driver _eglDriver = {
    .SignalSyncKHR = wgl_signal_sync_khr,
    .QueryDriverName = wgl_query_driver_name,
    .QueryDriverConfig = wgl_query_driver_config,
+   .GLInteropQueryDeviceInfo = wgl_interop_query_device_info,
+   .GLInteropExportObject = wgl_interop_export_object,
+   .GLInteropFlushObjects = wgl_interop_flush_objects,
 };
 

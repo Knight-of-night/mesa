@@ -1294,8 +1294,19 @@ static const nir_unsigned_upper_bound_config default_ub_config = {
    .min_subgroup_size = 1u,
    .max_subgroup_size = UINT16_MAX,
    .max_workgroup_invocations = UINT16_MAX,
-   .max_workgroup_count = {UINT16_MAX, UINT16_MAX, UINT16_MAX},
+
+   /* max_workgroup_count represents the maximum compute shader / kernel
+    * dispatchable work size. On most hardware, this is essentially
+    * unbounded. On some hardware max_workgroup_count[1] and
+    * max_workgroup_count[2] may be smaller.
+    */
+   .max_workgroup_count = {UINT32_MAX, UINT32_MAX, UINT32_MAX},
+
+   /* max_workgroup_size is the local invocation maximum. This is generally
+    * small the OpenGL 4.2 minimum maximum is 1024.
+    */
    .max_workgroup_size = {UINT16_MAX, UINT16_MAX, UINT16_MAX},
+
    .vertex_attrib_max = {
       UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
       UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
@@ -1515,6 +1526,9 @@ nir_unsigned_upper_bound(nir_shader *shader, struct hash_table *range_ht,
       case nir_op_extract_i8:
       case nir_op_extract_u16:
       case nir_op_extract_i16:
+      case nir_op_b2i8:
+      case nir_op_b2i16:
+      case nir_op_b2i32:
          break;
       case nir_op_u2u1:
       case nir_op_u2u8:
@@ -1645,6 +1659,11 @@ nir_unsigned_upper_bound(nir_shader *shader, struct hash_table *range_ht,
       case nir_op_u2u16:
       case nir_op_u2u32:
          res = MIN2(src0, max);
+         break;
+      case nir_op_b2i8:
+      case nir_op_b2i16:
+      case nir_op_b2i32:
+         res = 1;
          break;
       case nir_op_sad_u8x4:
          res = src2 + 4 * 255;

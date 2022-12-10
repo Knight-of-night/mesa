@@ -806,8 +806,8 @@ BlockSheduler::collect_ready_alu_vec(std::list<AluInstr *>& ready,
    }
 
    int max_check = 0;
-   while (i != e && max_check++ < 32) {
-      if (ready.size() < 32 && (*i)->ready()) {
+   while (i != e && max_check++ < 64) {
+      if (ready.size() < 64 && (*i)->ready()) {
 
          int priority = 0;
          /* LDS fetches that use static offsets are usually ready ery fast,
@@ -870,43 +870,43 @@ template <typename T> struct type_char {
 };
 
 template <> struct type_char<AluInstr> {
-   static constexpr const char value = 'A';
+   static char value() { return 'A';};
 };
 
 template <> struct type_char<AluGroup> {
-   static constexpr const char value = 'G';
+   static char value() { return 'G';};
 };
 
 template <> struct type_char<ExportInstr> {
-   static constexpr const char value = 'E';
+   static char value() { return 'E';};
 };
 
 template <> struct type_char<TexInstr> {
-   static constexpr const char value = 'T';
+   static char value() { return 'T';};
 };
 
 template <> struct type_char<FetchInstr> {
-   static constexpr const char value = 'F';
+   static char value() { return 'F';};
 };
 
 template <> struct type_char<WriteOutInstr> {
-   static constexpr const char value = 'M';
+   static char value() { return 'M';};
 };
 
 template <> struct type_char<MemRingOutInstr> {
-   static constexpr const char value = 'R';
+   static char value() { return 'R';};
 };
 
 template <> struct type_char<WriteTFInstr> {
-   static constexpr const char value = 'X';
+   static char value() { return 'X';};
 };
 
 template <> struct type_char<GDSInstr> {
-   static constexpr const char value = 'S';
+   static char value() { return 'S';};
 };
 
 template <> struct type_char<RatInstr> {
-   static constexpr const char value = 'I';
+   static char value() { return 'I';};
 };
 
 template <typename T>
@@ -928,7 +928,7 @@ BlockSheduler::collect_ready_type(std::list<T *>& ready, std::list<T *>& availab
    }
 
    for (auto& i : ready)
-      sfn_log << SfnLog::schedule << type_char<T>::value << ";  " << *i << "\n";
+      sfn_log << SfnLog::schedule << type_char<T>::value() << ";  " << *i << "\n";
 
    return !ready.empty();
 }

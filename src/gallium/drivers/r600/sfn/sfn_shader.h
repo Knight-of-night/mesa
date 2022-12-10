@@ -243,6 +243,8 @@ public:
 
    PRegister emit_load_to_register(PVirtualValue src);
 
+   virtual unsigned image_size_const_offset() { return 0;}
+
 protected:
    enum ESlots {
       es_face,
@@ -264,7 +266,7 @@ protected:
 
    std::bitset<es_last> m_sv_values;
 
-   Shader(const char *type_id);
+   Shader(const char *type_id, unsigned atomic_base);
 
    const ShaderInput& input(int base) const;
 
@@ -301,7 +303,6 @@ private:
    bool read_input(std::istream& is);
    virtual bool read_prop(std::istream& is) = 0;
 
-   bool emit_if_start(nir_if *if_stmt);
    bool emit_control_flow(ControlFlowInstr::CFType type);
    bool emit_store_scratch(nir_intrinsic_instr *intr);
    bool emit_load_scratch(nir_intrinsic_instr *intr);

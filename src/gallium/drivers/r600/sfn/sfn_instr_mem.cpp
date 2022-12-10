@@ -111,6 +111,11 @@ GDSInstr::emit_atomic_counter(nir_intrinsic_instr *intr, Shader& shader)
    }
 }
 
+uint8_t GDSInstr::allowed_src_chan_mask() const
+{
+   return m_src.free_chan_mask();
+}
+
 static ESDOp
 get_opcode(const nir_intrinsic_op opcode)
 {
@@ -899,7 +904,7 @@ RatInstr::emit_image_size(nir_intrinsic_instr *intrin, Shader& shader)
          shader.set_flag(Shader::sh_txs_cube_array_comp);
 
          if (const_offset) {
-            unsigned lookup_resid = const_offset[0].u32;
+            unsigned lookup_resid = const_offset[0].u32 + shader.image_size_const_offset();
             shader.emit_instruction(
                new AluInstr(op1_mov,
                             dest[2],

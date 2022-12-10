@@ -219,6 +219,7 @@ class LowerSplit64op : public NirLowerInstruction {
              * rounds, we have to remove the fractional part in the hi bits
              * For values > UINT_MAX the result is undefined */
             auto src = nir_ssa_for_alu_src(b, alu, 0);
+            src = nir_fsub(b, src, nir_ffract(b, src));
             auto gt0 = nir_flt(b, nir_imm_double(b, 0.0), src);
             auto highval = nir_fmul_imm(b, src, 1.0 / 65536.0);
             auto fract = nir_ffract(b, highval);
@@ -229,26 +230,7 @@ class LowerSplit64op : public NirLowerInstruction {
                              gt0,
                              nir_ior(b, nir_ishl_imm(b, high, 16), low),
                              nir_imm_int(b, 0));
-         }
-         case nir_op_f2i64: {
-            auto src = nir_ssa_for_alu_src(b, alu, 0);
-            auto gt0 = nir_flt(b, nir_imm_double(b, 0.0), src);
-            auto abs_src = nir_fabs(b, src);
-            auto value = nir_f2u64(b, abs_src);
-            return nir_bcsel(b, gt0, value, nir_isub(b, nir_imm_zero(b, 1, 64), value));
-         }
-         case nir_op_f2u64: {
-            auto src = nir_ssa_for_alu_src(b, alu, 0);
-            auto gt0 = nir_flt(b, nir_imm_double(b, 0.0), src);
-            auto highval = nir_fmul_imm(b, src, 1.0 / (65536.0 * 65536.0));
-            auto fract = nir_ffract(b, highval);
-            auto high = nir_f2u32(b, nir_fsub(b, highval, fract));
-            auto low = nir_f2u32(b, nir_fmul_imm(b, fract, 65536.0 * 65536.0));
-            return nir_bcsel(b,
-                             gt0,
-                             nir_pack_64_2x32_split(b, low, high),
-                             nir_imm_zero(b, 1, 64));
-         }
+         }        
          case nir_op_u2f64: {
             auto src = nir_ssa_for_alu_src(b, alu, 0);
             auto low = nir_unpack_64_2x32_split_x(b, src);
@@ -947,12 +929,12 @@ Lower64BitToVec2::lower(nir_instr *instr)
    }
    case nir_instr_type_load_const: {
       auto lc = nir_instr_as_load_const(instr);
-      assert(lc->def.num_components < 3);
-      nir_const_value val[4] = {{0}};
+      assert(lc->def.num_components <= 2);
+      nir_const_value val[4];
       for (uint i = 0; i < lc->def.num_components; ++i) {
          uint64_t v = lc->value[i].u64;
-         val[0].u32 = v & 0xffffffff;
-         val[1].u32 = (v >> 32) & 0xffffffff;
+         val[i * 2 + 0] = nir_const_value_for_uint(v & 0xffffffff, 32);
+         val[i * 2 + 1] = nir_const_value_for_uint(v >> 32, 32);
       }
 
       return nir_build_imm(b, 2 * lc->def.num_components, 32, val);

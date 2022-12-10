@@ -303,22 +303,22 @@ glx_display_free(struct glx_display *priv)
 
    /* Free the direct rendering per display data */
    if (priv->driswDisplay)
-      (*priv->driswDisplay->destroyDisplay) (priv->driswDisplay);
+      priv->driswDisplay->destroyDisplay(priv->driswDisplay);
    priv->driswDisplay = NULL;
 
 #if defined (GLX_USE_DRM)
    if (priv->dri2Display)
-      (*priv->dri2Display->destroyDisplay) (priv->dri2Display);
+      priv->dri2Display->destroyDisplay(priv->dri2Display);
    priv->dri2Display = NULL;
 
    if (priv->dri3Display)
-      (*priv->dri3Display->destroyDisplay) (priv->dri3Display);
+      priv->dri3Display->destroyDisplay(priv->dri3Display);
    priv->dri3Display = NULL;
 #endif /* GLX_USE_DRM */
 
 #if defined(GLX_USE_WINDOWSGL)
    if (priv->windowsdriDisplay)
-      (*priv->windowsdriDisplay->destroyDisplay) (priv->windowsdriDisplay);
+      priv->windowsdriDisplay->destroyDisplay(priv->windowsdriDisplay);
    priv->windowsdriDisplay = NULL;
 #endif /* GLX_USE_WINDOWSGL */
 
@@ -836,19 +836,19 @@ AllocAndFetchScreenConfigs(Display * dpy, struct glx_display * priv)
 #if defined(GLX_USE_DRM)
 #if defined(HAVE_DRI3)
       if (priv->dri3Display)
-         psc = (*priv->dri3Display->createScreen) (i, priv);
+         psc = priv->dri3Display->createScreen(i, priv);
 #endif /* HAVE_DRI3 */
       if (psc == NULL && priv->dri2Display)
-	 psc = (*priv->dri2Display->createScreen) (i, priv);
+	 psc = priv->dri2Display->createScreen(i, priv);
 #endif /* GLX_USE_DRM */
 
 #ifdef GLX_USE_WINDOWSGL
       if (psc == NULL && priv->windowsdriDisplay)
-	 psc = (*priv->windowsdriDisplay->createScreen) (i, priv);
+	 psc = priv->windowsdriDisplay->createScreen(i, priv);
 #endif
 
       if (psc == NULL && priv->driswDisplay)
-	 psc = (*priv->driswDisplay->createScreen) (i, priv);
+	 psc = priv->driswDisplay->createScreen(i, priv);
 #endif /* GLX_DIRECT_RENDERING && !GLX_USE_APPLEGL */
 
 #if defined(GLX_USE_APPLEGL)
@@ -923,9 +923,9 @@ __glXInitialize(Display * dpy)
 #if defined(GLX_DIRECT_RENDERING) && !defined(GLX_USE_APPLEGL)
    Bool glx_direct = !debug_get_bool_option("LIBGL_ALWAYS_INDIRECT", false);
    Bool glx_accel = !debug_get_bool_option("LIBGL_ALWAYS_SOFTWARE", false);
+   Bool zink;
    const char *env = getenv("MESA_LOADER_DRIVER_OVERRIDE");
-   Bool explicit_zink = env && !strcmp(env, "zink");
-   Bool infer_zink = false;
+   zink = env && !strcmp(env, "zink");
 
    dpyPriv->drawHash = __glxHashCreate();
 
@@ -940,20 +940,17 @@ __glXInitialize(Display * dpy)
     ** (e.g., those called in AllocAndFetchScreenConfigs).
     */
 #if defined(GLX_USE_DRM)
-   if (glx_direct && glx_accel && !explicit_zink) {
+   if (glx_direct && glx_accel && !zink) {
 #if defined(HAVE_DRI3)
       if (!debug_get_bool_option("LIBGL_DRI3_DISABLE", false))
          dpyPriv->dri3Display = dri3_create_display(dpy);
 #endif /* HAVE_DRI3 */
       if (!debug_get_bool_option("LIBGL_DRI2_DISABLE", false))
          dpyPriv->dri2Display = dri2CreateDisplay(dpy);
-      /* zink fallback */
-      if (!dpyPriv->dri3Display && !dpyPriv->dri2Display)
-         infer_zink =  !debug_get_bool_option("LIBGL_KOPPER_DISABLE", false) && !getenv("GALLIUM_DRIVER");
    }
 #endif /* GLX_USE_DRM */
    if (glx_direct)
-      dpyPriv->driswDisplay = driswCreateDisplay(dpy, explicit_zink | infer_zink);
+      dpyPriv->driswDisplay = driswCreateDisplay(dpy, zink);
 
 #ifdef GLX_USE_WINDOWSGL
    if (glx_direct && glx_accel)
@@ -969,22 +966,8 @@ __glXInitialize(Display * dpy)
 #endif
 
    if (!AllocAndFetchScreenConfigs(dpy, dpyPriv)) {
-#if defined(GLX_DIRECT_RENDERING) && !defined(GLX_USE_APPLEGL)
-      Bool fail = true;
-      /* if zink was inferred, retry without zink */
-      if (infer_zink && !explicit_zink) {
-         free(dpyPriv->screens);
-         driswCreateDisplay(dpy, false);
-         fail = !AllocAndFetchScreenConfigs(dpy, dpyPriv);
-      }
-      if (fail) {
-         free(dpyPriv);
-         return NULL;
-      }
-#else
       free(dpyPriv);
       return NULL;
-#endif
    }
 
    __glX_send_client_info(dpyPriv);

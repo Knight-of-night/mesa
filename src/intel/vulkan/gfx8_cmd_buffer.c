@@ -257,12 +257,8 @@ genX(cmd_emit_te)(struct anv_cmd_buffer *cmd_buffer)
 static void
 genX(cmd_emit_sample_mask)(struct anv_cmd_buffer *cmd_buffer)
 {
-   struct anv_graphics_pipeline *pipeline = cmd_buffer->state.gfx.pipeline;
    const struct vk_dynamic_graphics_state *dyn =
       &cmd_buffer->vk.dynamic_graphics_state;
-
-   if (!anv_pipeline_has_stage(pipeline, MESA_SHADER_FRAGMENT))
-      return;
 
    /* From the Vulkan 1.0 spec:
    *    If pSampleMask is NULL, it is treated as if the mask has all bits
@@ -641,8 +637,12 @@ genX(cmd_buffer_flush_dynamic_state)(struct anv_cmd_buffer *cmd_buffer)
 #endif
 
    if (pipeline->base.device->vk.enabled_extensions.EXT_sample_locations &&
-       BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_MS_SAMPLE_LOCATIONS))
-      genX(emit_sample_pattern)(&cmd_buffer->batch, dyn->ms.sample_locations);
+       (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_MS_SAMPLE_LOCATIONS) ||
+        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_MS_SAMPLE_LOCATIONS_ENABLE))) {
+      genX(emit_sample_pattern)(&cmd_buffer->batch,
+                                dyn->ms.sample_locations_enable ?
+                                dyn->ms.sample_locations : NULL);
+   }
 
    if ((cmd_buffer->state.gfx.dirty & ANV_CMD_DIRTY_PIPELINE) ||
        BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) ||

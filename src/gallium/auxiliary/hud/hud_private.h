@@ -51,7 +51,10 @@ struct hud_context {
    /* Context where the HUD is drawn: */
    struct pipe_context *pipe;
    struct cso_context *cso;
-   struct st_context_iface *st;
+
+   /* For notifying st_context to rebind states that we clobbered. */
+   void *st;
+   void (*st_invalidate_state)(void *st, unsigned flags);
 
    struct hud_batch_query_context *batch_query;
    struct list_head pane_list;
@@ -79,6 +82,7 @@ struct hud_context {
       float translate[2];
       float scale[2];
       float padding[2];
+      float rotate[4];
    } constants;
    struct pipe_constant_buffer constbuf;
 

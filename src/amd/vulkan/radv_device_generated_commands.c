@@ -26,6 +26,8 @@
 
 #include "nir_builder.h"
 
+#include "vk_common_entrypoints.h"
+
 static void
 radv_get_sequence_size(const struct radv_indirect_command_layout *layout,
                        const struct radv_graphics_pipeline *pipeline, uint32_t *cmd_size,
@@ -972,7 +974,7 @@ cleanup:
    return result;
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 radv_CreateIndirectCommandsLayoutNV(VkDevice _device,
                                     const VkIndirectCommandsLayoutCreateInfoNV *pCreateInfo,
                                     const VkAllocationCallbacks *pAllocator,
@@ -1048,7 +1050,7 @@ radv_CreateIndirectCommandsLayoutNV(VkDevice _device,
    return VK_SUCCESS;
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 radv_DestroyIndirectCommandsLayoutNV(VkDevice _device,
                                      VkIndirectCommandsLayoutNV indirectCommandsLayout,
                                      const VkAllocationCallbacks *pAllocator)
@@ -1063,7 +1065,7 @@ radv_DestroyIndirectCommandsLayoutNV(VkDevice _device,
    vk_free2(&device->vk.alloc, pAllocator, layout);
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 radv_GetGeneratedCommandsMemoryRequirementsNV(
    VkDevice _device, const VkGeneratedCommandsMemoryRequirementsInfoNV *pInfo,
    VkMemoryRequirements2 *pMemoryRequirements)
@@ -1086,7 +1088,7 @@ radv_GetGeneratedCommandsMemoryRequirementsNV(
       align(cmd_buf_size + upload_buf_size, pMemoryRequirements->memoryRequirements.alignment);
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 radv_CmdPreprocessGeneratedCommandsNV(VkCommandBuffer commandBuffer,
                                       const VkGeneratedCommandsInfoNV *pGeneratedCommandsInfo)
 {
@@ -1342,7 +1344,7 @@ radv_prepare_dgc(struct radv_cmd_buffer *cmd_buffer,
                                  ds_writes);
 
    unsigned block_count = MAX2(1, round_up_u32(pGeneratedCommandsInfo->sequencesCount, 64));
-   radv_CmdDispatch(radv_cmd_buffer_to_handle(cmd_buffer), block_count, 1, 1);
+   vk_common_CmdDispatch(radv_cmd_buffer_to_handle(cmd_buffer), block_count, 1, 1);
 
    radv_buffer_finish(&token_buffer);
    radv_meta_restore(&saved_state, cmd_buffer);

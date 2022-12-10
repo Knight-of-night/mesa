@@ -191,6 +191,7 @@ anv_shader_stage_to_nir(struct anv_device *device,
    const nir_shader_compiler_options *nir_options =
       compiler->nir_options[stage];
 
+   const bool rt_enabled = ANV_SUPPORT_RT && pdevice->info.has_ray_tracing;
    const struct spirv_to_nir_options spirv_options = {
       .caps = {
          .demote_to_helper_invocation = true,
@@ -227,8 +228,9 @@ anv_shader_stage_to_nir(struct anv_device *device,
          .post_depth_coverage = true,
          .runtime_descriptor_array = true,
          .float_controls = true,
-         .ray_query = ANV_SUPPORT_RT && pdevice->info.has_ray_tracing,
-         .ray_tracing = ANV_SUPPORT_RT && pdevice->info.has_ray_tracing,
+         .ray_cull_mask = rt_enabled,
+         .ray_query = rt_enabled,
+         .ray_tracing = rt_enabled,
          .shader_clock = true,
          .shader_viewport_index_layer = true,
          .stencil_export = true,
@@ -414,24 +416,6 @@ static void
 populate_sampler_prog_key(const struct intel_device_info *devinfo,
                           struct brw_sampler_prog_key_data *key)
 {
-   /* Almost all multisampled textures are compressed.  The only time when we
-    * don't compress a multisampled texture is for 16x MSAA with a surface
-    * width greater than 8k which is a bit of an edge case.  Since the sampler
-    * just ignores the MCS parameter to ld2ms when MCS is disabled, it's safe
-    * to tell the compiler to always assume compression.
-    */
-   key->compressed_multisample_layout_mask = ~0;
-
-   /* SkyLake added support for 16x MSAA.  With this came a new message for
-    * reading from a 16x MSAA surface with compression.  The new message was
-    * needed because now the MCS data is 64 bits instead of 32 or lower as is
-    * the case for 8x, 4x, and 2x.  The key->msaa_16 bit-field controls which
-    * message we use.  Fortunately, the 16x message works for 8x, 4x, and 2x
-    * so we can just use it unconditionally.  This may not be quite as
-    * efficient but it saves us from recompiling.
-    */
-   key->msaa_16 = ~0;
-
    for (int i = 0; i < BRW_MAX_SAMPLERS; i++) {
       /* Assume color sampler, no swizzling. (Works for BDW+) */
       key->swizzles[i] = SWIZZLE_XYZW;
@@ -2102,8 +2086,6 @@ anv_pipeline_compile_cs(struct anv_compute_pipeline *pipeline,
          return vk_error(pipeline, VK_ERROR_UNKNOWN);
       }
 
-      NIR_PASS(_, stage.nir, anv_nir_add_base_work_group_id);
-
       anv_pipeline_lower_nir(&pipeline->base, mem_ctx, &stage, layout,
                              false /* use_primitive_replication */);
 
@@ -2468,6 +2450,8 @@ compile_upload_rt_shader(struct anv_ray_tracing_pipeline *pipeline,
          .address_format = nir_address_format_64bit_global,
          .stack_alignment = BRW_BTD_STACK_ALIGN,
          .localized_loads = true,
+         .vectorizer_callback = brw_nir_should_vectorize_mem,
+         .vectorizer_data = NULL,
       };
 
       NIR_PASS(_, nir, nir_lower_shader_calls, &opts,
@@ -2776,8 +2760,6 @@ anv_pipeline_compile_ray_tracing(struct anv_ray_tracing_pipeline *pipeline,
          return vk_error(pipeline, VK_ERROR_OUT_OF_HOST_MEMORY);
       }
 
-      stages[i].nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_8;
-
       anv_pipeline_lower_nir(&pipeline->base, pipeline_ctx, &stages[i],
                              layout, false /* use_primitive_replication */);
 
@@ -3018,8 +3000,6 @@ anv_device_init_rt_shaders(struct anv_device *device)
       void *tmp_ctx = ralloc_context(NULL);
       nir_shader *trivial_return_nir =
          brw_nir_create_trivial_return_shader(device->physical->compiler, tmp_ctx);
-
-      trivial_return_nir->info.subgroup_size = SUBGROUP_SIZE_REQUIRE_8;
 
       NIR_PASS_V(trivial_return_nir, brw_nir_lower_rt_intrinsics, device->info);
 

@@ -31,22 +31,20 @@ static bool
 src_is_invocation_id(const nir_src *src)
 {
    assert(src->is_ssa);
-   if (src->ssa->parent_instr->type != nir_instr_type_intrinsic)
-      return false;
-
-   return nir_instr_as_intrinsic(src->ssa->parent_instr)->intrinsic ==
-             nir_intrinsic_load_invocation_id;
+   nir_ssa_scalar s = nir_ssa_scalar_resolved(src->ssa, 0);
+   return s.def->parent_instr->type == nir_instr_type_intrinsic &&
+          nir_instr_as_intrinsic(s.def->parent_instr)->intrinsic ==
+              nir_intrinsic_load_invocation_id;
 }
 
 static bool
 src_is_local_invocation_index(const nir_src *src)
 {
    assert(src->is_ssa);
-   if (src->ssa->parent_instr->type != nir_instr_type_intrinsic)
-      return false;
-
-   return nir_instr_as_intrinsic(src->ssa->parent_instr)->intrinsic ==
-             nir_intrinsic_load_local_invocation_index;
+   nir_ssa_scalar s = nir_ssa_scalar_resolved(src->ssa, 0);
+   return s.def->parent_instr->type == nir_instr_type_intrinsic &&
+          nir_instr_as_intrinsic(s.def->parent_instr)->intrinsic ==
+              nir_intrinsic_load_local_invocation_index;
 }
 
 static void
@@ -1001,7 +999,8 @@ nir_shader_gather_info(nir_shader *shader, nir_function_impl *entrypoint)
       if (var->data.bindless || var->interface_type)
          continue;
 
-      shader->info.num_textures += glsl_type_get_sampler_count(var->type);
+      shader->info.num_textures += glsl_type_get_sampler_count(var->type) +
+                                   glsl_type_get_texture_count(var->type);
       shader->info.num_images += glsl_type_get_image_count(var->type);
    }
 
