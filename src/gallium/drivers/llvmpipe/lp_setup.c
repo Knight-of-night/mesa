@@ -70,8 +70,6 @@ lp_setup_wait_empty_scene(struct lp_setup_context *setup)
 {
    /* just use the first scene if we run out */
    if (setup->scenes[0]->fence) {
-      debug_printf("%s: wait for scene %d\n",
-                   __func__, setup->scenes[0]->fence->id);
       lp_fence_wait(setup->scenes[0]->fence);
       lp_scene_end_rasterization(setup->scenes[0]);
    }
@@ -1515,6 +1513,10 @@ lp_setup_destroy(struct lp_setup_context *setup)
 
    for (unsigned i = 0; i < ARRAY_SIZE(setup->ssbos); i++) {
       pipe_resource_reference(&setup->ssbos[i].current.buffer, NULL);
+   }
+
+   for (unsigned i = 0; i < ARRAY_SIZE(setup->images); i++) {
+      pipe_resource_reference(&setup->images[i].current.resource, NULL);
    }
 
    /* free the scenes in the 'empty' queue */

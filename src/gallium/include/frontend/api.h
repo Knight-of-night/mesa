@@ -170,6 +170,7 @@ struct st_config_options
    bool disable_blend_func_extended;
    bool disable_glsl_line_continuations;
    bool disable_arb_gpu_shader5;
+   bool disable_uniform_array_resize;
    bool force_compat_shaders;
    bool force_glsl_extensions_warn;
    unsigned force_glsl_version;
@@ -191,6 +192,7 @@ struct st_config_options
    bool allow_draw_out_of_order;
    bool glthread_nop_check_framebuffer_status;
    bool ignore_map_unsynchronized;
+   bool ignore_discard_framebuffer;
    bool force_integer_tex_nearest;
    bool force_gl_names_reuse;
    bool force_gl_map_buffer_synchronized;
@@ -271,7 +273,8 @@ struct pipe_frontend_drawable
                     struct pipe_frontend_drawable *drawable,
                     const enum st_attachment_type *statts,
                     unsigned count,
-                    struct pipe_resource **out);
+                    struct pipe_resource **out,
+                    struct pipe_resource **resolve);
 
    bool (*flush_swapbuffers)(struct st_context *st,
                              struct pipe_frontend_drawable *drawable);

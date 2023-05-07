@@ -1378,6 +1378,7 @@ util_format_get_plane_format(enum pipe_format format, unsigned plane)
    case PIPE_FORMAT_Y8_U8_V8_422_UNORM:
    case PIPE_FORMAT_Y8_U8_V8_444_UNORM:
    case PIPE_FORMAT_Y8_400_UNORM:
+   case PIPE_FORMAT_R8_G8_B8_UNORM:
       return PIPE_FORMAT_R8_UNORM;
    case PIPE_FORMAT_NV12:
    case PIPE_FORMAT_Y8_U8V8_422_UNORM:
@@ -1705,6 +1706,12 @@ util_format_snorm_to_unorm(enum pipe_format format);
 
 enum pipe_format
 util_format_rgbx_to_rgba(enum pipe_format format);
+
+/* Returns the pipe format for the given array type, bitsize and component count. */
+enum pipe_format
+util_format_get_array(const enum util_format_type type, const unsigned bits,
+                      const unsigned nr_components, const bool normalized,
+                      const bool pure_integer);
 
 #ifdef __cplusplus
 } // extern "C" {

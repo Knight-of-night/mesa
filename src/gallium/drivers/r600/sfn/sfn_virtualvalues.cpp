@@ -198,7 +198,6 @@ void
 Register::add_parent(Instr *instr)
 {
    m_parents.insert(instr);
-   instr->add_use();
    add_parent_to_array(instr);
 }
 
@@ -212,7 +211,6 @@ void
 Register::del_parent(Instr *instr)
 {
    m_parents.erase(instr);
-   instr->dec_use();
    del_parent_from_array(instr);
 }
 
@@ -225,14 +223,7 @@ Register::del_parent_from_array(Instr *instr)
 void
 Register::add_use(Instr *instr)
 {
-   const auto& [itr, inserted] = m_uses.insert(instr);
-   {
-   }
-
-   if (inserted) {
-      for (auto& p : m_parents)
-         p->add_use();
-   }
+   m_uses.insert(instr);
 }
 
 void
@@ -241,9 +232,6 @@ Register::del_use(Instr *instr)
    sfn_log << SfnLog::opt << "Del use of " << *this << " in " << *instr << "\n";
    if (m_uses.find(instr) != m_uses.end()) {
       m_uses.erase(instr);
-      if (m_flags.test(ssa))
-         for (auto& p : m_parents)
-            p->dec_use();
    }
 }
 
@@ -656,7 +644,7 @@ InlineConstant::from_string(const std::string& s)
       use_chan = entry->second.second;
    }
 
-   ASSERT_OR_THROW(value != ALU_SRC_UNKNOWN, "Unknwon inline constant was given");
+   ASSERT_OR_THROW(value != ALU_SRC_UNKNOWN, "Unknown inline constant was given");
 
    if (use_chan) {
       ASSERT_OR_THROW(s[i + 1] == '.', "inline const channel not started with '.'");
@@ -683,7 +671,7 @@ InlineConstant::from_string(const std::string& s)
          chan = 7;
          break;
       default:
-         ASSERT_OR_THROW(0, "invalied inline const channel ");
+         ASSERT_OR_THROW(0, "invalid inline const channel ");
       }
    }
    return new InlineConstant(value, chan);
@@ -816,7 +804,7 @@ UniformValue::from_string(const std::string& s)
       chan = 3;
       break;
    default:
-      unreachable("Unknown channle when reading uniform");
+      unreachable("Unknown channel when reading uniform");
    }
    return new UniformValue(index + 512, chan, bank);
 }

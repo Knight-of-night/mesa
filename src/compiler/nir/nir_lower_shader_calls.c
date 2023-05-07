@@ -790,6 +790,7 @@ duplicate_loop_bodies(nir_function_impl *impl, nir_instr *resume_instr)
          continue;
 
       nir_loop *loop = nir_cf_node_as_loop(node);
+      assert(!nir_loop_has_continue_construct(loop));
 
       if (resume_reg == NULL) {
          /* We only create resume_reg if we encounter a loop.  This way we can
@@ -1038,6 +1039,7 @@ flatten_resume_if_ladder(nir_builder *b,
       case nir_cf_node_loop: {
          assert(!before_cursor);
          nir_loop *loop = nir_cf_node_as_loop(child);
+         assert(!nir_loop_has_continue_construct(loop));
 
          if (cf_node_contains_block(&loop->cf_node, resume_instr->block)) {
             /* Thanks to our loop body duplication pass, every level of loop
@@ -1181,6 +1183,13 @@ lower_resume(nir_shader *shader, int call_idx)
 
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
    nir_instr *resume_instr = find_resume_instr(impl, call_idx);
+
+   /* Deref chains contain metadata information that is needed by other passes
+    * after this one. If we don't rematerialize the derefs in the blocks where
+    * they're used here, the following lowerings will insert phis which can
+    * prevent other passes from chasing deref chains.
+    */
+   nir_rematerialize_derefs_in_use_blocks_impl(impl);
 
    if (duplicate_loop_bodies(impl, resume_instr)) {
       nir_validate_shader(shader, "after duplicate_loop_bodies in "
@@ -1968,11 +1977,11 @@ nir_lower_shader_calls(nir_shader *shader,
    for (unsigned i = 0; i < num_calls; i++) {
       nir_instr *resume_instr = lower_resume(resume_shaders[i], i);
       replace_resume_with_halt(resume_shaders[i], resume_instr);
-      nir_opt_remove_phis(resume_shaders[i]);
       /* Remove the dummy blocks added by flatten_resume_if_ladder() */
       nir_opt_if(resume_shaders[i], nir_opt_if_optimize_phi_true_false);
       nir_opt_dce(resume_shaders[i]);
       nir_opt_dead_cf(resume_shaders[i]);
+      nir_opt_remove_phis(resume_shaders[i]);
    }
 
    for (unsigned i = 0; i < num_calls; i++)

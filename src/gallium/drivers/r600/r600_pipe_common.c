@@ -34,6 +34,7 @@
 #include "util/format/u_format_s3tc.h"
 #include "util/u_upload_mgr.h"
 #include "util/os_time.h"
+#include "util/hex.h"
 #include "vl/vl_decoder.h"
 #include "vl/vl_video_buffer.h"
 #include "radeon_video.h"
@@ -716,7 +717,7 @@ static const struct debug_named_value common_debug_options[] = {
 
 static const char* r600_get_vendor(struct pipe_screen* pscreen)
 {
-	return "X.Org";
+	return "Mesa";
 }
 
 static const char* r600_get_device_vendor(struct pipe_screen* pscreen)
@@ -772,7 +773,7 @@ static void r600_disk_cache_create(struct r600_common_screen *rscreen)
 		return;
 
 	_mesa_sha1_final(&ctx, sha1);
-	disk_cache_format_hex_id(cache_id, sha1, 20 * 2);
+	mesa_bytes_to_hex(cache_id, sha1, 20);
 
 	/* These flags affect shader compilation. */
 	uint64_t shader_debug_flags =
@@ -1205,6 +1206,13 @@ static void r600_resource_destroy(struct pipe_screen *screen,
 	}
 }
 
+static int r600_get_screen_fd(struct pipe_screen *screen)
+{
+	struct radeon_winsys *ws = ((struct r600_common_screen*)screen)->ws;
+
+	return ws->get_fd(ws);
+}
+
 bool r600_common_screen_init(struct r600_common_screen *rscreen,
 			     struct radeon_winsys *ws)
 {
@@ -1212,7 +1220,7 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 	struct utsname uname_data;
 	const char *chip_name;
 
-	ws->query_info(ws, &rscreen->info, false, false);
+	ws->query_info(ws, &rscreen->info);
 	rscreen->ws = ws;
 
 	chip_name = r600_get_family_name(rscreen);
@@ -1236,6 +1244,7 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 	rscreen->b.get_device_vendor = r600_get_device_vendor;
 	rscreen->b.get_disk_shader_cache = r600_get_disk_shader_cache;
 	rscreen->b.get_compute_param = r600_get_compute_param;
+	rscreen->b.get_screen_fd = r600_get_screen_fd;
 	rscreen->b.get_paramf = r600_get_paramf;
 	rscreen->b.get_timestamp = r600_get_timestamp;
 	rscreen->b.get_compiler_options = r600_get_compiler_options;
@@ -1276,8 +1285,8 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 
 	if (rscreen->debug_flags & DBG_INFO) {
 		printf("pci (domain:bus:dev.func): %04x:%02x:%02x.%x\n",
-		       rscreen->info.pci_domain, rscreen->info.pci_bus,
-		       rscreen->info.pci_dev, rscreen->info.pci_func);
+		       rscreen->info.pci.domain, rscreen->info.pci.bus,
+		       rscreen->info.pci.dev, rscreen->info.pci.func);
 		printf("pci_id = 0x%x\n", rscreen->info.pci_id);
 		printf("family = %i (%s)\n", rscreen->info.family,
 		       r600_get_family_name(rscreen));
@@ -1320,7 +1329,7 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 		printf("num_render_backends = %i\n", rscreen->info.max_render_backends);
 		printf("num_tile_pipes = %i\n", rscreen->info.num_tile_pipes);
 		printf("pipe_interleave_bytes = %i\n", rscreen->info.pipe_interleave_bytes);
-		printf("enabled_rb_mask = 0x%x\n", rscreen->info.enabled_rb_mask);
+		printf("enabled_rb_mask = 0x%" PRIx64 "\n", rscreen->info.enabled_rb_mask);
 		printf("max_alignment = %u\n", (unsigned)rscreen->info.max_alignment);
 	}
 
@@ -1340,6 +1349,7 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 		.lower_extract_word = true,
 		.lower_insert_byte = true,
 		.lower_insert_word = true,
+		.lower_ldexp = true,
 		.lower_rotate = true,
 		/* due to a bug in the shader compiler, some loops hang
 		 * if they are not unrolled, see:
@@ -1357,8 +1367,6 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 		.lower_iabs = true,
 		.lower_uadd_sat = true,
 		.lower_usub_sat = true,
-		.lower_bitfield_extract = true,
-		.lower_bitfield_insert_to_bitfield_select = true,
 		.has_fused_comp_and_csel = true,
 		.lower_find_msb_to_reverse = true,
 		.lower_to_scalar = true,
@@ -1367,7 +1375,8 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 		.lower_fpow = true,
 		.lower_int64_options = ~0,
 		.lower_cs_local_index_to_id = true,
-		.lower_uniforms_to_ubo = true
+		.lower_uniforms_to_ubo = true,
+		.lower_image_offset_to_range_base = 1
 	};
 
 	rscreen->nir_options = nir_options;
@@ -1375,14 +1384,22 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 	if (rscreen->info.family < CHIP_CEDAR)
 		rscreen->nir_options.force_indirect_unrolling_sampler = true;
 
+   if (rscreen->info.gfx_level >= EVERGREEN) {
+      rscreen->nir_options.lower_bitfield_extract = true;
+		rscreen->nir_options.lower_bitfield_insert_to_bitfield_select = true;
+   }
+
 	if (rscreen->info.gfx_level < EVERGREEN) {
 		/* Pre-EG doesn't have these ALU ops */
 		rscreen->nir_options.lower_bit_count = true;
 		rscreen->nir_options.lower_bitfield_reverse = true;
+      rscreen->nir_options.lower_bitfield_insert_to_shifts = true;
+      rscreen->nir_options.lower_bitfield_extract_to_shifts = true;
 	}
 
 	if (rscreen->info.gfx_level < CAYMAN) {
 		rscreen->nir_options.lower_doubles_options = nir_lower_fp64_full_software;
+		rscreen->nir_options.lower_atomic_offset_to_range_base = true;
 	} else {
 		rscreen->nir_options.lower_doubles_options =
 			nir_lower_ddiv |

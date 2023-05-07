@@ -94,6 +94,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "c11/threads.h"
+#include "mapi/glapi/glapi.h"
 #include "util/u_debug.h"
 #include "util/macros.h"
 #include "util/perf/cpu_trace.h"
@@ -2649,7 +2650,7 @@ eglDebugMessageControlKHR(EGLDEBUGPROCKHR callback,
             // On error, set the last error code, call the current
             // debug callback, and return the error code.
             simple_mtx_unlock(_eglGlobal.Mutex);
-            _eglReportError(EGL_BAD_ATTRIBUTE, NULL,
+            _eglDebugReport(EGL_BAD_ATTRIBUTE, NULL, EGL_DEBUG_MSG_ERROR_KHR,
                   "Invalid attribute 0x%04lx", (unsigned long) attrib_list[i]);
             return EGL_BAD_ATTRIBUTE;
          }
@@ -2690,7 +2691,7 @@ eglQueryDebugKHR(EGLint attribute, EGLAttrib *value)
       break;
    default:
       simple_mtx_unlock(_eglGlobal.Mutex);
-      _eglReportError(EGL_BAD_ATTRIBUTE, NULL,
+      _eglDebugReport(EGL_BAD_ATTRIBUTE, NULL, EGL_DEBUG_MSG_ERROR_KHR,
                       "Invalid attribute 0x%04lx", (unsigned long) attribute);
       return EGL_FALSE;
    }
@@ -2885,8 +2886,8 @@ eglGetProcAddress(const char *procname)
          ret = entrypoint->function;
    }
 
-   if (!ret && _eglDriver.GetProcAddress)
-      ret = _eglDriver.GetProcAddress(procname);
+   if (!ret)
+      ret = _glapi_get_proc_address(procname);
 
    RETURN_EGL_SUCCESS(NULL, ret);
 }

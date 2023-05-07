@@ -109,6 +109,71 @@ vlVaQueryConfigEntrypoints(VADriverContextP ctx, VAProfile profile,
    return VA_STATUS_SUCCESS;
 }
 
+static unsigned int get_screen_supported_va_rt_formats(struct pipe_screen *pscreen,
+                                                       enum pipe_video_profile profile,
+                                                       enum pipe_video_entrypoint entrypoint)
+{
+   unsigned int supported_rt_formats = 0;
+
+   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_NV12,
+                                          profile,
+                                          entrypoint) ||
+       pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_YV12,
+                                          profile,
+                                          entrypoint) ||
+       pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_IYUV,
+                                          profile,
+                                          entrypoint))
+      supported_rt_formats |= VA_RT_FORMAT_YUV420;
+
+   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_P010,
+                                          profile,
+                                          entrypoint) ||
+       pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_P016,
+                                          profile,
+                                          entrypoint))
+      supported_rt_formats |= VA_RT_FORMAT_YUV420_10BPP;
+
+   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_Y8_400_UNORM,
+                                          profile,
+                                          entrypoint))
+      supported_rt_formats |= VA_RT_FORMAT_YUV400;
+
+   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_Y8_U8_V8_444_UNORM,
+                                          profile,
+                                          entrypoint))
+      supported_rt_formats |= VA_RT_FORMAT_YUV444;
+
+   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_UYVY,
+                                          profile,
+                                          entrypoint) ||
+       pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_YUYV,
+                                          profile,
+                                          entrypoint))
+      supported_rt_formats |= VA_RT_FORMAT_YUV422;
+
+   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_R8G8B8A8_UNORM,
+                                          profile,
+                                          entrypoint) ||
+       pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_R8G8B8A8_UINT,
+                                          profile,
+                                          entrypoint) ||
+       pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_R8G8B8X8_UNORM,
+                                          profile,
+                                          entrypoint) ||
+       pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_R8G8B8X8_UINT,
+                                          profile,
+                                          entrypoint))
+      supported_rt_formats |= VA_RT_FORMAT_RGB32;
+   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_R8_G8_B8_UNORM,
+                                          profile,
+                                          entrypoint))
+      supported_rt_formats |= VA_RT_FORMAT_RGBP;
+
+
+   return supported_rt_formats;
+}
+
 VAStatus
 vlVaGetConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoint,
                         VAConfigAttrib *attrib_list, int num_attribs)
@@ -127,22 +192,13 @@ vlVaGetConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoint en
           (vl_codec_supported(pscreen, ProfileToPipe(profile), false))) {
          switch (attrib_list[i].type) {
          case VAConfigAttribRTFormat:
-            value = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV422;
-            if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_P010,
-                                                   ProfileToPipe(profile),
-                                                   PIPE_VIDEO_ENTRYPOINT_BITSTREAM) ||
-                pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_P016,
-                                                   ProfileToPipe(profile),
-                                                   PIPE_VIDEO_ENTRYPOINT_BITSTREAM))
-               value |= VA_RT_FORMAT_YUV420_10BPP;
-            if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_Y8_400_UNORM,
-                                                   ProfileToPipe(profile),
-                                                   PIPE_VIDEO_ENTRYPOINT_BITSTREAM))
-               value |= VA_RT_FORMAT_YUV400;
-            if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_Y8_U8_V8_444_UNORM,
-                                                   ProfileToPipe(profile),
-                                                   PIPE_VIDEO_ENTRYPOINT_BITSTREAM))
-               value |= VA_RT_FORMAT_YUV444;
+            /*
+            * Different gallium drivers will have different supported formats
+            * If modifying this, please query the driver like below
+            */
+            value = get_screen_supported_va_rt_formats(pscreen,
+                                                       ProfileToPipe(profile),
+                                                       PIPE_VIDEO_ENTRYPOINT_BITSTREAM);
             break;
          default:
             value = VA_ATTRIB_NOT_SUPPORTED;
@@ -152,18 +208,22 @@ vlVaGetConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoint en
                  (vl_codec_supported(pscreen, ProfileToPipe(profile), true))) {
          switch (attrib_list[i].type) {
          case VAConfigAttribRTFormat:
-            value = VA_RT_FORMAT_YUV420;
-            if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_P010,
-                                                   ProfileToPipe(profile),
-                                                   PIPE_VIDEO_ENTRYPOINT_ENCODE) ||
-                pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_P016,
-                                                   ProfileToPipe(profile),
-                                                   PIPE_VIDEO_ENTRYPOINT_ENCODE))
-               value |= VA_RT_FORMAT_YUV420_10BPP;
+            value = get_screen_supported_va_rt_formats(pscreen,
+                                                       ProfileToPipe(profile),
+                                                       PIPE_VIDEO_ENTRYPOINT_ENCODE);
             break;
          case VAConfigAttribRateControl:
+         {
+            /* Legacy behavior reports these three modes for all drivers */
             value = VA_RC_CQP | VA_RC_CBR | VA_RC_VBR;
-            break;
+
+            /* Check for optional mode QVBR */
+            int supports_qvbr = pscreen->get_video_param(pscreen, ProfileToPipe(profile),
+                                             PIPE_VIDEO_ENTRYPOINT_ENCODE,
+                                             PIPE_VIDEO_CAP_ENC_RATE_CONTROL_QVBR);
+            if (supports_qvbr > 0)
+               value |= VA_RC_QVBR;
+         } break;
          case VAConfigAttribEncRateControlExt:
             value = pscreen->get_video_param(pscreen, ProfileToPipe(profile),
                                              PIPE_VIDEO_ENTRYPOINT_ENCODE,
@@ -338,9 +398,9 @@ vlVaGetConfigAttributes(VADriverContextP ctx, VAProfile profile, VAEntrypoint en
       } else if (entrypoint == VAEntrypointVideoProc) {
          switch (attrib_list[i].type) {
          case VAConfigAttribRTFormat:
-            value = (VA_RT_FORMAT_YUV420 |
-                     VA_RT_FORMAT_YUV420_10BPP |
-                     VA_RT_FORMAT_RGB32);
+            value = get_screen_supported_va_rt_formats(pscreen,
+                                                       PIPE_VIDEO_PROFILE_UNKNOWN,
+                                                       PIPE_VIDEO_ENTRYPOINT_PROCESSING);
             break;
          default:
             value = VA_ATTRIB_NOT_SUPPORTED;
@@ -369,6 +429,7 @@ vlVaCreateConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoin
       return VA_STATUS_ERROR_INVALID_CONTEXT;
 
    drv = VL_VA_DRIVER(ctx);
+   pscreen = VL_VA_PSCREEN(ctx);
 
    if (!drv)
       return VA_STATUS_ERROR_INVALID_CONTEXT;
@@ -385,9 +446,9 @@ vlVaCreateConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoin
 
       config->entrypoint = PIPE_VIDEO_ENTRYPOINT_PROCESSING;
       config->profile = PIPE_VIDEO_PROFILE_UNKNOWN;
-      supported_rt_formats = VA_RT_FORMAT_YUV420 |
-                             VA_RT_FORMAT_YUV420_10BPP |
-                             VA_RT_FORMAT_RGB32;
+      supported_rt_formats = get_screen_supported_va_rt_formats(pscreen,
+                                                                config->profile,
+                                                                config->entrypoint);
       for (int i = 0; i < num_attribs; i++) {
          if (attrib_list[i].type == VAConfigAttribRTFormat) {
             if (attrib_list[i].value & supported_rt_formats) {
@@ -421,11 +482,8 @@ vlVaCreateConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoin
       return VA_STATUS_ERROR_UNSUPPORTED_PROFILE;
    }
 
-   pscreen = VL_VA_PSCREEN(ctx);
-
    switch (entrypoint) {
    case VAEntrypointVLD:
-      supported_rt_formats = VA_RT_FORMAT_YUV420 | VA_RT_FORMAT_YUV422;
       if (!vl_codec_supported(pscreen, p, false)) {
          FREE(config);
          if (!vl_codec_supported(pscreen, p, true))
@@ -438,7 +496,6 @@ vlVaCreateConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoin
       break;
 
    case VAEntrypointEncSlice:
-      supported_rt_formats = VA_RT_FORMAT_YUV420;
       if (!vl_codec_supported(pscreen, p, true)) {
          FREE(config);
          if (!vl_codec_supported(pscreen, p, false))
@@ -460,20 +517,9 @@ vlVaCreateConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoin
    }
 
    config->profile = p;
-   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_P010, p,
-         config->entrypoint) ||
-       pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_P016, p,
-         config->entrypoint))
-      supported_rt_formats |= VA_RT_FORMAT_YUV420_10BPP;
-   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_Y8_400_UNORM,
-                                          ProfileToPipe(profile),
-                                          config->entrypoint))
-      supported_rt_formats |= VA_RT_FORMAT_YUV400;
-   if (pscreen->is_video_format_supported(pscreen, PIPE_FORMAT_Y8_U8_V8_444_UNORM,
-                                          ProfileToPipe(profile),
-                                          config->entrypoint))
-      supported_rt_formats |= VA_RT_FORMAT_YUV444;
-
+   supported_rt_formats = get_screen_supported_va_rt_formats(pscreen,
+                                                             config->profile,
+                                                             config->entrypoint);
    for (int i = 0; i <num_attribs ; i++) {
       if (attrib_list[i].type != VAConfigAttribRTFormat &&
          entrypoint == VAEntrypointVLD ) {
@@ -487,6 +533,8 @@ vlVaCreateConfig(VADriverContextP ctx, VAProfile profile, VAEntrypoint entrypoin
             config->rc = PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE;
          else if (attrib_list[i].value == VA_RC_CQP)
             config->rc = PIPE_H2645_ENC_RATE_CONTROL_METHOD_DISABLE;
+         else if (attrib_list[i].value == VA_RC_QVBR)
+            config->rc = PIPE_H2645_ENC_RATE_CONTROL_METHOD_QUALITY_VARIABLE;
          else {
             FREE(config);
             return VA_STATUS_ERROR_INVALID_VALUE;

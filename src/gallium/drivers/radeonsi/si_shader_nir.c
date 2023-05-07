@@ -23,7 +23,9 @@
  */
 
 #include "nir_builder.h"
+#include "nir_xfb_info.h"
 #include "si_pipe.h"
+#include "ac_nir.h"
 
 
 static bool si_alu_to_scalar_filter(const nir_instr *instr, const void *data)
@@ -195,9 +197,10 @@ static void si_late_optimize_16bit_samplers(struct si_screen *sscreen, nir_shade
       },
    };
    struct nir_fold_16bit_tex_image_options fold_16bit_options = {
-      .rounding_mode = nir_rounding_mode_rtne,
-      .fold_tex_dest = true,
-      .fold_image_load_store_data = true,
+      .rounding_mode = nir_rounding_mode_rtz,
+      .fold_tex_dest_types = nir_type_float,
+      .fold_image_dest_types = nir_type_float,
+      .fold_image_store_data = true,
       .fold_srcs_options_count = has_g16 ? 2 : 1,
       .fold_srcs_options = fold_srcs_options,
    };
@@ -264,16 +267,18 @@ static void si_lower_nir(struct si_screen *sscreen, struct nir_shader *nir)
     *   and copy-propagated
     */
 
-   static const struct nir_lower_tex_options lower_tex_options = {
+   const struct nir_lower_tex_options lower_tex_options = {
       .lower_txp = ~0u,
       .lower_txs_cube_array = true,
       .lower_invalid_implicit_lod = true,
       .lower_tg4_offsets = true,
+      .lower_to_fragment_fetch_amd = sscreen->info.gfx_level < GFX11,
    };
    NIR_PASS_V(nir, nir_lower_tex, &lower_tex_options);
 
-   static const struct nir_lower_image_options lower_image_options = {
+   const struct nir_lower_image_options lower_image_options = {
       .lower_cube_size = true,
+      .lower_to_fragment_mask_load_amd = sscreen->info.gfx_level < GFX11,
    };
    NIR_PASS_V(nir, nir_lower_image, &lower_image_options);
 
@@ -347,6 +352,61 @@ static void si_lower_nir(struct si_screen *sscreen, struct nir_shader *nir)
    NIR_PASS_V(nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
 }
 
+static bool si_mark_divergent_texture_non_uniform(struct nir_shader *nir)
+{
+   assert(nir->info.divergence_analysis_run);
+
+   /* sampler_non_uniform and texture_non_uniform are always false in GLSL,
+    * but this can lead to unexpected behavior if texture/sampler index come from
+    * a vertex attribute.
+    *
+    * For instance, 2 consecutive draws using 2 different index values,
+    * could be squashed together by the hw - producing a single draw with
+    * non-dynamically uniform index.
+    *
+    * To avoid this, detect divergent indexing, mark them as non-uniform,
+    * so that we can apply waterfall loop on these index later (either llvm
+    * backend or nir_lower_non_uniform_access).
+    *
+    * See https://gitlab.freedesktop.org/mesa/mesa/-/issues/2253
+    */
+
+   bool divergence_changed = false;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_foreach_block_safe(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_tex)
+            continue;
+
+         nir_tex_instr *tex = nir_instr_as_tex(instr);
+         for (int i = 0; i < tex->num_srcs; i++) {
+            bool divergent = tex->src[i].src.ssa->divergent;
+
+            switch (tex->src[i].src_type) {
+            case nir_tex_src_texture_deref:
+            case nir_tex_src_texture_handle:
+               tex->texture_non_uniform |= divergent;
+               break;
+            case nir_tex_src_sampler_deref:
+            case nir_tex_src_sampler_handle:
+               tex->sampler_non_uniform |= divergent;
+               break;
+            default:
+               break;
+            }
+         }
+
+         /* If dest is already divergent, divergence won't change. */
+         divergence_changed |= !tex->dest.ssa.divergent &&
+            (tex->texture_non_uniform || tex->sampler_non_uniform);
+      }
+   }
+
+   nir_metadata_preserve(impl, nir_metadata_all);
+   return divergence_changed;
+}
+
 char *si_finalize_nir(struct pipe_screen *screen, void *nirptr)
 {
    struct si_screen *sscreen = (struct si_screen *)screen;
@@ -354,6 +414,11 @@ char *si_finalize_nir(struct pipe_screen *screen, void *nirptr)
 
    nir_lower_io_passes(nir);
 
+   NIR_PASS_V(nir, ac_nir_lower_subdword_loads,
+              (ac_nir_lower_subdword_options) {
+                 .modes_1_comp = nir_var_mem_ubo,
+                 .modes_N_comps = nir_var_mem_ubo | nir_var_mem_ssbo
+              });
    NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_mem_shared, nir_address_format_32bit_offset);
 
    /* Remove dead derefs, so that we can remove uniforms. */
@@ -369,6 +434,10 @@ char *si_finalize_nir(struct pipe_screen *screen, void *nirptr)
 
    si_lower_nir(sscreen, nir);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+
+   /* Update xfb info after we did medium io lowering. */
+   if (nir->xfb_info && nir->info.outputs_written_16bit)
+      nir_gather_xfb_info_from_intrinsics(nir);
 
    if (sscreen->options.inline_uniforms)
       nir_find_inlinable_uniforms(nir);
@@ -390,6 +459,13 @@ char *si_finalize_nir(struct pipe_screen *screen, void *nirptr)
 
    NIR_PASS_V(nir, nir_convert_to_lcssa, true, true); /* required by divergence analysis */
    NIR_PASS_V(nir, nir_divergence_analysis); /* to find divergent loops */
+
+   /* Must be after divergence analysis. */
+   bool divergence_changed = false;
+   NIR_PASS(divergence_changed, nir, si_mark_divergent_texture_non_uniform);
+   /* Re-analysis whole shader if texture instruction divergence changed. */
+   if (divergence_changed)
+      NIR_PASS_V(nir, nir_divergence_analysis);
 
    return NULL;
 }

@@ -52,10 +52,13 @@
 #include "util/u_blitter.h"
 #include "util/u_draw.h"
 #include "util/u_helpers.h"
+#include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "util/u_prim.h"
 #include "util/u_upload_mgr.h"
 #include "util/u_debug_cb.h"
+#include "util/u_surface.h"
+#include "util/u_transfer.h"
 
 #include "hw/common.xml.h"
 
@@ -546,6 +549,18 @@ etna_context_force_flush(struct etna_cmd_stream *stream, void *priv)
 
 }
 
+void
+etna_context_add_flush_resource(struct etna_context *ctx,
+                                struct pipe_resource *rsc)
+{
+   bool found;
+
+   _mesa_set_search_or_add(ctx->flush_resources, rsc, &found);
+
+   if (!found)
+      pipe_reference(NULL, &rsc->reference);
+}
+
 static void
 etna_set_debug_callback(struct pipe_context *pctx,
                         const struct util_debug_callback *cb)
@@ -608,6 +623,8 @@ etna_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
    pctx->fence_server_sync = etna_fence_server_sync;
    pctx->emit_string_marker = etna_emit_string_marker;
    pctx->set_frontend_noop = etna_set_frontend_noop;
+   pctx->clear_buffer = u_default_clear_buffer;
+   pctx->clear_texture = util_clear_texture;
 
    /* creation of compile states */
    pctx->create_blend_state = etna_blend_state_create;

@@ -157,6 +157,7 @@ static void scan_tess_ctrl(nir_cf_node *cf_node, unsigned *upper_block_tf_writem
    }
    case nir_cf_node_loop: {
       nir_loop *loop = nir_cf_node_as_loop(cf_node);
+      assert(!nir_loop_has_continue_construct(loop));
       foreach_list_typed(nir_cf_node, nested_node, node, &loop->body)
       {
          scan_tess_ctrl(nested_node, cond_block_tf_writemask, cond_block_tf_writemask,
@@ -225,15 +226,19 @@ static void scan_io_usage(const nir_shader *nir, struct si_shader_info *info,
    unsigned interp = INTERP_MODE_FLAT; /* load_input uses flat shading */
 
    if (intr->intrinsic == nir_intrinsic_load_interpolated_input) {
-      nir_intrinsic_instr *baryc = nir_instr_as_intrinsic(intr->src[0].ssa->parent_instr);
-
-      if (baryc) {
+      nir_instr *src_instr = intr->src[0].ssa->parent_instr;
+      if (src_instr->type == nir_instr_type_intrinsic) {
+         nir_intrinsic_instr *baryc = nir_instr_as_intrinsic(src_instr);
          if (nir_intrinsic_infos[baryc->intrinsic].index_map[NIR_INTRINSIC_INTERP_MODE] > 0)
             interp = nir_intrinsic_interp_mode(baryc);
          else
             unreachable("unknown barycentric intrinsic");
       } else {
-         unreachable("unknown barycentric expression");
+         /* May get here when si_update_shader_binary_info() after ps lower bc_optimize
+          * which select center and centroid. Set to any value is OK because we don't
+          * care this when si_update_shader_binary_info().
+          */
+         interp = INTERP_MODE_SMOOTH;
       }
    }
 
@@ -777,22 +782,21 @@ void si_nir_scan_shader(struct si_screen *sscreen, const struct nir_shader *nir,
    if (nir->info.stage == MESA_SHADER_VERTEX ||
        nir->info.stage == MESA_SHADER_TESS_CTRL ||
        nir->info.stage == MESA_SHADER_TESS_EVAL) {
-      info->esgs_itemsize = util_last_bit64(info->outputs_written) * 16;
-      info->lshs_vertex_stride = info->esgs_itemsize;
+      info->esgs_vertex_stride = util_last_bit64(info->outputs_written) * 16;
+      info->lshs_vertex_stride = info->esgs_vertex_stride;
 
       /* Add 1 dword to reduce LDS bank conflicts, so that each vertex
        * will start on a different bank. (except for the maximum 32*16).
        */
-      if (info->lshs_vertex_stride < 32 * 16)
-         info->lshs_vertex_stride += 4;
+      info->lshs_vertex_stride += 4;
 
       /* For the ESGS ring in LDS, add 1 dword to reduce LDS bank
-       * conflicts, i.e. each vertex will start at a different bank.
+       * conflicts, i.e. each vertex will start on a different bank.
        */
       if (sscreen->info.gfx_level >= GFX9)
-         info->esgs_itemsize += 4;
-
-      assert(((info->esgs_itemsize / 4) & C_028AAC_ITEMSIZE) == 0);
+         info->esgs_vertex_stride += 4;
+      else
+         assert(((info->esgs_vertex_stride / 4) & C_028AAC_ITEMSIZE) == 0);
 
       info->tcs_vgpr_only_inputs = ~info->base.tess.tcs_cross_invocation_inputs_read &
                                    ~info->base.inputs_read_indirectly &

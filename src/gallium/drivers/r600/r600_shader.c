@@ -218,7 +218,7 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 				sel->nir_blob = NULL;
 			}
 			sel->nir = tgsi_to_nir(sel->tokens, ctx->screen, true);
-			/* Lower int64 ops because we have some r600 build-in shaders that use it */
+			/* Lower int64 ops because we have some r600 built-in shaders that use it */
 			if (nir_options->lower_int64_options) {
 				NIR_PASS_V(sel->nir, nir_lower_regs_to_ssa);
 				NIR_PASS_V(sel->nir, nir_lower_alu_to_scalar, r600_lower_to_scalar_instr_filter, NULL);
@@ -395,13 +395,14 @@ int r600_pipe_shader_create(struct pipe_context *ctx,
 			   shader->shader.bc.ncf,
 			   shader->shader.bc.nstack);
 
-	if (!sel->nir_blob && sel->nir) {
+	if (!sel->nir_blob && sel->nir && sel->ir_type != PIPE_SHADER_IR_TGSI) {
 		struct blob blob;
 		blob_init(&blob);
 		nir_serialize(&blob, sel->nir, false);
 		sel->nir_blob = malloc(blob.size);
 		memcpy(sel->nir_blob, blob.data, blob.size);
 		sel->nir_blob_size = blob.size;
+		blob_finish(&blob);
 	}
 	ralloc_free(sel->nir);
 	sel->nir = NULL;
@@ -537,7 +538,7 @@ static int tgsi_is_supported(struct r600_shader_ctx *ctx)
 	struct tgsi_full_instruction *i = &ctx->parse.FullToken.FullInstruction;
 	unsigned j;
 
-	if (i->Instruction.NumDstRegs > 1 && i->Instruction.Opcode != TGSI_OPCODE_DFRACEXP) {
+	if (i->Instruction.NumDstRegs > 1) {
 		R600_ERR("too many dst (%d)\n", i->Instruction.NumDstRegs);
 		return -EINVAL;
 	}
@@ -3401,7 +3402,7 @@ static int r600_emit_tess_factor(struct r600_shader_ctx *ctx)
  * calculated from the MBCNT instructions.
  * Then the shader engine ID is multiplied by 256,
  * and the wave id is added.
- * Then the result is multipled by 64 and thread id is
+ * Then the result is multiplied by 64 and thread id is
  * added.
  */
 static int load_thread_id_gpr(struct r600_shader_ctx *ctx)
@@ -4881,70 +4882,6 @@ static int tgsi_dneg(struct r600_shader_ctx *ctx)
 	return 0;
 
 }
-
-static int tgsi_dfracexp(struct r600_shader_ctx *ctx)
-{
-	struct tgsi_full_instruction *inst = &ctx->parse.FullToken.FullInstruction;
-	struct r600_bytecode_alu alu;
-	unsigned write_mask = inst->Dst[0].Register.WriteMask;
-	int i, j, r;
-
-	for (i = 0; i <= 3; i++) {
-		memset(&alu, 0, sizeof(struct r600_bytecode_alu));
-		alu.op = ctx->inst_info->op;
-
-		alu.dst.sel = ctx->temp_reg;
-		alu.dst.chan = i;
-		alu.dst.write = 1;
-		for (j = 0; j < inst->Instruction.NumSrcRegs; j++) {
-			r600_bytecode_src(&alu.src[j], &ctx->src[j], fp64_switch(i));
-		}
-
-		if (i == 3)
-			alu.last = 1;
-
-		r = r600_bytecode_add_alu(ctx->bc, &alu);
-		if (r)
-			return r;
-	}
-
-	/* Replicate significand result across channels. */
-	for (i = 0; i <= 3; i++) {
-		if (!(write_mask & (1 << i)))
-			continue;
-
-		memset(&alu, 0, sizeof(struct r600_bytecode_alu));
-		alu.op = ALU_OP1_MOV;
-		alu.src[0].chan = (i & 1) + 2;
-		alu.src[0].sel = ctx->temp_reg;
-
-		tgsi_dst(ctx, &inst->Dst[0], i, &alu.dst);
-		alu.dst.write = 1;
-		alu.last = 1;
-		r = r600_bytecode_add_alu(ctx->bc, &alu);
-		if (r)
-			return r;
-	}
-
-	for (i = 0; i <= 3; i++) {
-		if (inst->Dst[1].Register.WriteMask & (1 << i)) {
-			/* MOV third channels to writemask dst1 */
-			memset(&alu, 0, sizeof(struct r600_bytecode_alu));
-			alu.op = ALU_OP1_MOV;
-			alu.src[0].chan = 1;
-			alu.src[0].sel = ctx->temp_reg;
-
-			tgsi_dst(ctx, &inst->Dst[1], i, &alu.dst);
-			alu.last = 1;
-			r = r600_bytecode_add_alu(ctx->bc, &alu);
-			if (r)
-				return r;
-			break;
-		}
-	}
-	return 0;
-}
-
 
 static int egcm_int_to_double(struct r600_shader_ctx *ctx)
 {
@@ -8437,7 +8374,7 @@ static int tgsi_tex(struct r600_shader_ctx *ctx)
 		if (inst->Texture.Texture == TGSI_TEXTURE_2D_ARRAY ||
 			 inst->Texture.Texture == TGSI_TEXTURE_SHADOW2D_ARRAY)
 			/* make sure array index selector is 0, this is just a safety
-			 * precausion because TGSI seems to emit something strange here */
+			 * precaution because TGSI seems to emit something strange here */
 			t->src_sel_z = 4;
 		else
 			t->src_sel_z = inst->TexOffsets[0].SwizzleZ;
@@ -12221,7 +12158,6 @@ static const struct r600_shader_tgsi_instruction eg_shader_tgsi_instruction[] = 
 	[TGSI_OPCODE_DFMA]	= { ALU_OP3_FMA_64, tgsi_op3_64},
 	[TGSI_OPCODE_DFRAC]	= { ALU_OP1_FRACT_64, tgsi_op2_64},
 	[TGSI_OPCODE_DLDEXP]	= { ALU_OP2_LDEXP_64, tgsi_op2_64},
-	[TGSI_OPCODE_DFRACEXP]	= { ALU_OP1_FREXP_64, tgsi_dfracexp},
 	[TGSI_OPCODE_D2I]	= { ALU_OP1_FLT_TO_INT, egcm_double_to_int},
 	[TGSI_OPCODE_I2D]	= { ALU_OP1_INT_TO_FLT, egcm_int_to_double},
 	[TGSI_OPCODE_D2U]	= { ALU_OP1_FLT_TO_UINT, egcm_double_to_int},
@@ -12448,7 +12384,6 @@ static const struct r600_shader_tgsi_instruction cm_shader_tgsi_instruction[] = 
 	[TGSI_OPCODE_DFMA]	= { ALU_OP3_FMA_64, tgsi_op3_64},
 	[TGSI_OPCODE_DFRAC]	= { ALU_OP1_FRACT_64, tgsi_op2_64},
 	[TGSI_OPCODE_DLDEXP]	= { ALU_OP2_LDEXP_64, tgsi_op2_64},
-	[TGSI_OPCODE_DFRACEXP]	= { ALU_OP1_FREXP_64, tgsi_dfracexp},
 	[TGSI_OPCODE_D2I]	= { ALU_OP1_FLT_TO_INT, egcm_double_to_int},
 	[TGSI_OPCODE_I2D]	= { ALU_OP1_INT_TO_FLT, egcm_int_to_double},
 	[TGSI_OPCODE_D2U]	= { ALU_OP1_FLT_TO_UINT, egcm_double_to_int},

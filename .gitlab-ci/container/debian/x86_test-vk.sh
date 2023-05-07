@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # The relative paths in this file only become valid at runtime.
 # shellcheck disable=SC1091
 # shellcheck disable=SC2086 # we want word splitting
@@ -51,12 +51,12 @@ STABLE_EPHEMERAL=" \
 
 apt-get install -y --no-remove --no-install-recommends \
       $STABLE_EPHEMERAL \
+      curl \
       libepoxy0 \
       libxcb-shm0 \
       pciutils \
       python3-lxml \
       python3-simplejson \
-      wget \
       xinit \
       xserver-xorg-video-amdgpu \
       xserver-xorg-video-ati
@@ -65,10 +65,6 @@ apt-get install -y --no-remove --no-install-recommends \
 apt-key add .gitlab-ci/container/debian/winehq.gpg.key
 apt-add-repository https://dl.winehq.org/wine-builds/debian/
 apt-get update -q
-
-# Needed for Valve's tracing jobs to collect information about the graphics
-# hardware on the test devices.
-pip3 install gfxinfo-mupuf==0.0.9
 
 # workaround wine needing 32-bit
 # https://bugs.winehq.org/show_bug.cgi?id=53393
@@ -105,7 +101,7 @@ wine64 \
 
 . .gitlab-ci/container/build-hang-detection.sh
 
-############### Build piglit
+############### Build piglit replayer
 
 PIGLIT_BUILD_TARGETS="piglit_replayer" . .gitlab-ci/container/build-piglit.sh
 
@@ -139,3 +135,6 @@ apt-get purge -y \
       $STABLE_EPHEMERAL
 
 apt-get autoremove -y --purge
+
+# hack to remove Debian libdrm (until bookworm), deqp sometimes load old libdrm, we could remove here eventually Mesa too; execute on both GL and VK container
+dpkg -r --force-depends "libdrm2" "libdrm-radeon1" "libdrm-nouveau2" "libdrm-intel1" "libdrm-amdgpu1" "libdrm-common"  # "mesa-vulkan-drivers" "mesa-vdpau-drivers" "mesa-va-drivers" "libgl1-mesa-dri" "libglx-mesa0" "vdpau-driver-all" "va-driver-all" "libglx0" "libgl1" "libvdpau-va-gl1" "libglu1-mesa" "libegl-mesa0" "libgl1-mesa-dri" "libglapi-mesa" "libosmesa6"

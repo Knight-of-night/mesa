@@ -295,7 +295,7 @@ r600_bytecode_write_export_ack_type(struct r600_bytecode *bc, bool indirect)
 	}
 }
 
-/* alu instructions that can ony exits once per group */
+/* alu instructions that can only exits once per group */
 static int is_alu_once_inst(struct r600_bytecode_alu *alu)
 {
 	return r600_isa_alu(alu->op)->flags & (AF_KILL | AF_PRED) || alu->is_lds_idx_op || alu->op == ALU_OP0_GROUP_BARRIER;
@@ -611,7 +611,7 @@ static int check_and_set_bank_swizzle(const struct r600_bytecode *bc,
 		return 0;
 
 	/* Just check every possible combination of bank swizzle.
-	 * Not very efficent, but works on the first try in most of the cases. */
+	 * Not very efficient, but works on the first try in most of the cases. */
 	for (i = 0; i < 4; i++)
 		if (!slots[i] || !slots[i]->bank_swizzle_force || slots[i]->is_lds_idx_op)
 			bank_swizzle[i] = SQ_ALU_VEC_012;
@@ -818,6 +818,8 @@ static int merge_inst_groups(struct r600_bytecode *bc, struct r600_bytecode_alu 
 	int have_mova = 0, have_rel = 0;
 	int max_slots = bc->gfx_level == CAYMAN ? 4 : 5;
 
+   bool has_dot = false;
+
 	r = assign_alu_units(bc, alu_prev, prev);
 	if (r)
 		return r;
@@ -828,6 +830,8 @@ static int merge_inst_groups(struct r600_bytecode *bc, struct r600_bytecode_alu 
 			      return 0;
 		      if (is_alu_once_inst(prev[i]))
 			      return 0;
+				has_dot |= prev[i]->op == ALU_OP2_DOT || prev[i]->op == ALU_OP2_DOT_IEEE;
+
 
                       if (prev[i]->op == ALU_OP1_INTERP_LOAD_P0)
                          interp_xz |= 3;
@@ -840,6 +844,8 @@ static int merge_inst_groups(struct r600_bytecode *bc, struct r600_bytecode_alu 
 			if (slots[i]->pred_sel)
 				return 0;
 			if (is_alu_once_inst(slots[i]))
+				return 0;
+         has_dot |= slots[i]->op == ALU_OP2_DOT || slots[i]->op == ALU_OP2_DOT_IEEE;
 				return 0;
                         if (slots[i]->op == ALU_OP1_INTERP_LOAD_P0)
                            interp_xz |= 3;
@@ -889,7 +895,7 @@ static int merge_inst_groups(struct r600_bytecode *bc, struct r600_bytecode_alu 
 			result[i] = prev[i];
 			continue;
 		} else if (prev[i] && slots[i]) {
-			if (max_slots == 5 && result[4] == NULL && prev[4] == NULL && slots[4] == NULL) {
+			if (max_slots == 5 && !has_dot && result[4] == NULL && prev[4] == NULL && slots[4] == NULL) {
 				/* Trans unit is still free try to use it. */
 				if (is_alu_any_unit_inst(bc, slots[i]) && !alu_uses_lds(slots[i])) {
 					result[i] = prev[i];
@@ -956,7 +962,7 @@ static int merge_inst_groups(struct r600_bytecode *bc, struct r600_bytecode_alu 
 				if (!prev[j] || !alu_writes(prev[j]))
 					continue;
 
-				/* If it's relative then we can't determin which gpr is really used. */
+				/* If it's relative then we can't determine which gpr is really used. */
 				if (prev[j]->dst.chan == alu->src[src].chan &&
 					(prev[j]->dst.sel == alu->src[src].sel ||
 					prev[j]->dst.rel || alu->src[src].rel))
@@ -976,7 +982,7 @@ static int merge_inst_groups(struct r600_bytecode *bc, struct r600_bytecode_alu 
 
 	/* looks like everything worked out right, apply the changes */
 
-	/* undo adding previus literals */
+	/* undo adding previous literals */
 	bc->cf_last->ndw -= align(prev_nliteral, 2);
 
 	/* sort instructions */
@@ -1437,11 +1443,11 @@ static unsigned r600_bytecode_num_tex_and_vtx_instructions(const struct r600_byt
 	}
 }
 
-static inline boolean last_inst_was_not_vtx_fetch(struct r600_bytecode *bc)
+static inline boolean last_inst_was_not_vtx_fetch(struct r600_bytecode *bc, bool use_tc)
 {
 	return !((r600_isa_cf(bc->cf_last->op)->flags & CF_FETCH) &&
 		 bc->cf_last->op != CF_OP_GDS &&
-		 (bc->gfx_level == CAYMAN ||
+		 (bc->gfx_level == CAYMAN || use_tc ||
 		  bc->cf_last->op != CF_OP_TEX));
 }
 
@@ -1461,9 +1467,10 @@ static int r600_bytecode_add_vtx_internal(struct r600_bytecode *bc, const struct
 			egcm_load_index_reg(bc, vtx->buffer_index_mode - 1, false);
 	}
 
+
 	/* cf can contains only alu or only vtx or only tex */
 	if (bc->cf_last == NULL ||
-	    last_inst_was_not_vtx_fetch(bc) ||
+	    last_inst_was_not_vtx_fetch(bc, use_tc) ||
 	    bc->force_add_cf) {
 		r = r600_bytecode_add_cf(bc);
 		if (r) {

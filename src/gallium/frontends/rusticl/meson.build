@@ -64,6 +64,7 @@ rusticl_files = files(
   'core/format.rs',
   'core/kernel.rs',
   'core/memory.rs',
+  'core/platform.rs',
   'core/program.rs',
   'core/queue.rs',
   'core/util.rs',
@@ -195,6 +196,7 @@ rusticl_mesa_bindings_inline_wrapper = static_library(
   ],
   dependencies: [
     idep_nir_headers,
+    dep_valgrind,
   ],
 )
 
@@ -208,6 +210,9 @@ rusticl_mesa_bindings_rs = rust.bindgen(
     inc_include,
     inc_nir,
     inc_src,
+  ],
+  dependencies: [
+    dep_valgrind,
   ],
   c_args : [
     rusticl_bindgen_c_args,

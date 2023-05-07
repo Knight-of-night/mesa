@@ -58,11 +58,9 @@ dEQP-GLES31.functional.synchronization.inter_call.without_memory_barrier.*
 
 dEQP-GLES31.functional.texture.gather.basic.2d_array.rgba8.filter_mode.min_nearest_mipmap_nearest_mag_linear
 
-glx@glx-swap-copy
 glx@glx-swap-event_interval
 glx@glx_arb_sync_control@swapbuffersmsc-divisor-zero
 glx@glx_arb_sync_control@waitformsc
-glx@glx-copy-sub-buffer.*
 glx@glx-multithread-texture
 glx@glx-swap-event_async
 shaders@glsl-uniform-interstage-limits@subdivide 5
@@ -114,3 +112,6 @@ spec@!opengl 1.1@depthstencil-default_fb-copypixels
 spec@arb_direct_state_access@gettextureimage-formats
 spec@ext_polygon_offset_clamp@ext_polygon_offset_clamp-draw_gles2
 spec@ext_polygon_offset_clamp@ext_polygon_offset_clamp-draw_gles2@negative clamp
+
+# 1/10 run flake
+KHR-GLES31.shaders.layout_location.isampler_2d

@@ -38,6 +38,7 @@
 #include "pipe-loader/pipe_loader.h"
 #include "state_tracker/st_context.h"
 
+#include "util/u_cpu_detect.h"
 #include "util/u_memory.h"
 #include "util/u_debug.h"
 
@@ -63,6 +64,11 @@ dri_create_context(struct dri_screen *screen,
       screen->dri2.backgroundCallable;
    const struct driOptionCache *optionCache = &screen->dev->option_cache;
 
+   /* This is effectively doing error checking for GLX context creation (by both
+    * Mesa and the X server) when the driver doesn't support the robustness ext.
+    * EGL already checks, so it won't send us the flags if the ext isn't
+    * available.
+    */
    if (screen->has_reset_status_query) {
       allowed_flags |= __DRI_CTX_FLAG_ROBUST_BUFFER_ACCESS;
       allowed_attribs |= __DRIVER_CONTEXT_ATTRIB_RESET_STRATEGY;
@@ -189,14 +195,40 @@ dri_create_context(struct dri_screen *screen,
 
    if (ctx->st->cso_context) {
       ctx->pp = pp_init(ctx->st->pipe, screen->pp_enabled, ctx->st->cso_context,
-                        ctx->st, (void*)st_context_invalidate_state);
+                        ctx->st, st_context_invalidate_state);
       ctx->hud = hud_create(ctx->st->cso_context,
                             share_ctx ? share_ctx->hud : NULL,
-                            ctx->st, (void*)st_context_invalidate_state);
+                            ctx->st, st_context_invalidate_state);
    }
 
+   /* order of precedence (least to most):
+    * - driver setting
+    * - app setting
+    * - user setting
+    */
+   bool enable_glthread = driQueryOptionb(&screen->dev->option_cache, "mesa_glthread_driver");
+
+   /* always disable glthread by default if fewer than 5 "big" CPUs are active */
+   unsigned nr_big_cpus = util_get_cpu_caps()->nr_big_cpus;
+   if (util_get_cpu_caps()->nr_cpus < 4 || (nr_big_cpus && nr_big_cpus < 5))
+      enable_glthread = false;
+
+   int app_enable_glthread = driQueryOptioni(&screen->dev->option_cache, "mesa_glthread_app_profile");
+   if (app_enable_glthread != -1) {
+      /* if set (not -1), apply the app setting */
+      enable_glthread = app_enable_glthread == 1;
+   }
+   if (getenv("mesa_glthread")) {
+      /* only apply the env var if set */
+      bool user_enable_glthread = debug_get_bool_option("mesa_glthread", false);
+      if (user_enable_glthread != enable_glthread) {
+         /* print warning to mimic old behavior */
+         fprintf(stderr, "ATTENTION: default value of option mesa_glthread overridden by environment.");
+      }
+      enable_glthread = user_enable_glthread;
+   }
    /* Do this last. */
-   if (driQueryOptionb(&screen->dev->option_cache, "mesa_glthread")) {
+   if (enable_glthread) {
       bool safe = true;
 
       /* This is only needed by X11/DRI2, which can be unsafe. */

@@ -92,7 +92,8 @@ etna_configure_sampler_ts(struct etna_sampler_ts *sts, struct pipe_sampler_view 
    struct etna_resource *rsc = etna_resource(pview->texture);
    struct etna_resource_level *lev = &rsc->levels[0];
 
-   if (lev->clear_value != sts->TS_SAMPLER_CLEAR_VALUE)
+   if ((lev->clear_value & 0xffffffff) != sts->TS_SAMPLER_CLEAR_VALUE ||
+       (lev->clear_value >> 32) != sts->TS_SAMPLER_CLEAR_VALUE2)
       dirty = true;
 
    assert(rsc->ts_bo && lev->ts_valid);
@@ -336,9 +337,13 @@ static void
 etna_texture_barrier(struct pipe_context *pctx, unsigned flags)
 {
    struct etna_context *ctx = etna_context(pctx);
-   /* clear color and texture cache to make sure that texture unit reads
-    * what has been written */
-   etna_set_state(ctx->stream, VIVS_GL_FLUSH_CACHE, VIVS_GL_FLUSH_CACHE_COLOR | VIVS_GL_FLUSH_CACHE_TEXTURE);
+
+   etna_set_state(ctx->stream, VIVS_GL_FLUSH_CACHE,
+                  VIVS_GL_FLUSH_CACHE_COLOR | VIVS_GL_FLUSH_CACHE_DEPTH |
+                  VIVS_GL_FLUSH_CACHE_TEXTURE);
+   etna_set_state(ctx->stream, VIVS_GL_FLUSH_CACHE,
+                  VIVS_GL_FLUSH_CACHE_TEXTUREVS);
+   etna_stall(ctx->stream, SYNC_RECIPIENT_RA, SYNC_RECIPIENT_PE);
 }
 
 uint32_t

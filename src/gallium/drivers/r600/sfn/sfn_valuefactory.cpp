@@ -118,6 +118,8 @@ ValueFactory::allocate_registers(const exec_list *registers)
       length = a.length;
    }
 
+   m_required_array_registers = m_next_register_index ? m_next_register_index : 0;
+
    foreach_list_typed(nir_register, reg, node, registers)
    {
       if (!reg->num_array_elems) {
@@ -660,7 +662,7 @@ ValueFactory::dest_from_string(const std::string& s)
    int sel = 0;
    if (s[0] == '_') {
       /* Since these instructions still may use or switch to a different
-       * channel we have to create a new instance for each occurance */
+       * channel we have to create a new instance for each occurrence */
       sel = std::numeric_limits<int>::max() - m_nowrite_idx++;
    } else {
       std::istringstream n(index_str);

@@ -1,28 +1,10 @@
 /*
- * Copyright (C) 2021 Alyssa Rosenzweig <alyssa@rosenzweig.io>
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice (including the next
- * paragraph) shall be included in all copies or substantial portions of the
- * Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright 2021 Alyssa Rosenzweig
+ * SPDX-License-Identifier: MIT
  */
 
-#include "agx_compiler.h"
 #include "agx_builder.h"
+#include "agx_compiler.h"
 
 /* SSA-based register allocator */
 
@@ -43,7 +25,7 @@ struct ra_ctx {
 
 /** Returns number of registers written by an instruction */
 unsigned
-agx_write_registers(agx_instr *I, unsigned d)
+agx_write_registers(const agx_instr *I, unsigned d)
 {
    unsigned size = agx_size_align_16(I->dest[d].size);
 
@@ -52,9 +34,13 @@ agx_write_registers(agx_instr *I, unsigned d)
       assert(1 <= I->channels && I->channels <= 4);
       return I->channels * size;
 
-   case AGX_OPCODE_DEVICE_LOAD:
    case AGX_OPCODE_TEXTURE_LOAD:
    case AGX_OPCODE_TEXTURE_SAMPLE:
+      /* Even when masked out, these clobber 4 registers */
+      return 4 * size;
+
+   case AGX_OPCODE_DEVICE_LOAD:
+   case AGX_OPCODE_LOCAL_LOAD:
    case AGX_OPCODE_LD_TILE:
       return util_bitcount(I->mask) * size;
 
@@ -85,12 +71,108 @@ agx_split_width(const agx_instr *I)
    return width;
 }
 
+unsigned
+agx_read_registers(const agx_instr *I, unsigned s)
+{
+   unsigned size = agx_size_align_16(I->src[s].size);
+
+   switch (I->op) {
+   case AGX_OPCODE_SPLIT:
+      return I->nr_dests * agx_size_align_16(agx_split_width(I));
+
+   case AGX_OPCODE_DEVICE_STORE:
+   case AGX_OPCODE_LOCAL_STORE:
+   case AGX_OPCODE_ST_TILE:
+      if (s == 0)
+         return util_bitcount(I->mask) * size;
+      else
+         return size;
+
+   case AGX_OPCODE_ZS_EMIT:
+      if (s == 1) {
+         /* Depth (bit 0) is fp32, stencil (bit 1) is u16 in the hw but we pad
+          * up to u32 for simplicity
+          */
+         return 2 * (!!(I->zs & 1) + !!(I->zs & 2));
+      } else {
+         return 1;
+      }
+
+   case AGX_OPCODE_TEXTURE_LOAD:
+   case AGX_OPCODE_TEXTURE_SAMPLE:
+      if (s == 0) {
+         /* Coordinates. We handle layer + sample index as 32-bit even when only
+          * the lower 16-bits are present.
+          */
+         switch (I->dim) {
+         case AGX_DIM_1D:
+            return 2 * 1;
+         case AGX_DIM_1D_ARRAY:
+            return 2 * 2;
+         case AGX_DIM_2D:
+            return 2 * 2;
+         case AGX_DIM_2D_ARRAY:
+            return 2 * 3;
+         case AGX_DIM_2D_MS:
+            return 2 * 3;
+         case AGX_DIM_3D:
+            return 2 * 3;
+         case AGX_DIM_CUBE:
+            return 2 * 3;
+         case AGX_DIM_CUBE_ARRAY:
+            return 2 * 4;
+         case AGX_DIM_2D_MS_ARRAY:
+            return 2 * 3;
+         }
+
+         unreachable("Invalid texture dimension");
+      } else if (s == 1) {
+         /* LOD */
+         if (I->lod_mode == AGX_LOD_MODE_LOD_GRAD) {
+            switch (I->dim) {
+            case AGX_DIM_1D:
+            case AGX_DIM_1D_ARRAY:
+               return 2 * 2 * 1;
+            case AGX_DIM_2D:
+            case AGX_DIM_2D_ARRAY:
+            case AGX_DIM_2D_MS_ARRAY:
+            case AGX_DIM_2D_MS:
+               return 2 * 2 * 2;
+            case AGX_DIM_CUBE:
+            case AGX_DIM_CUBE_ARRAY:
+            case AGX_DIM_3D:
+               return 2 * 2 * 3;
+            }
+
+            unreachable("Invalid texture dimension");
+         } else {
+            return 1;
+         }
+      } else if (s == 4) {
+         /* Compare/offset */
+         return 2 * ((!!I->shadow) + (!!I->offset));
+      } else {
+         return size;
+      }
+
+   case AGX_OPCODE_ATOMIC:
+   case AGX_OPCODE_LOCAL_ATOMIC:
+      if (s == 0 && I->atomic_opc == AGX_ATOMIC_OPC_CMPXCHG)
+         return size * 2;
+      else
+         return size;
+
+   default:
+      return size;
+   }
+}
+
 static unsigned
 find_regs(BITSET_WORD *used_regs, unsigned count, unsigned align, unsigned max)
 {
    assert(count >= 1);
 
-   for (unsigned reg = 0; reg < max; reg += align) {
+   for (unsigned reg = 0; reg + count <= max; reg += align) {
       if (!BITSET_TEST_RANGE(used_regs, reg, reg + count - 1))
          return reg;
    }
@@ -119,20 +201,21 @@ find_regs(BITSET_WORD *used_regs, unsigned count, unsigned align, unsigned max)
 static void
 reserve_live_in(struct ra_ctx *rctx)
 {
-      int i;
-      BITSET_FOREACH_SET(i, rctx->block->live_in, rctx->shader->alloc) {
-         /* Skip values defined in loops when processing the loop header */
-         if (!BITSET_TEST(rctx->visited, i))
-            continue;
+   int i;
+   BITSET_FOREACH_SET(i, rctx->block->live_in, rctx->shader->alloc) {
+      /* Skip values defined in loops when processing the loop header */
+      if (!BITSET_TEST(rctx->visited, i))
+         continue;
 
-         for (unsigned j = 0; j < rctx->ncomps[i]; ++j)
-            BITSET_SET(rctx->used_regs, rctx->ssa_to_reg[i] + j);
-      }
+      for (unsigned j = 0; j < rctx->ncomps[i]; ++j)
+         BITSET_SET(rctx->used_regs, rctx->ssa_to_reg[i] + j);
+   }
 }
 
 static void
 assign_regs(struct ra_ctx *rctx, agx_index v, unsigned reg)
 {
+   assert(reg < rctx->bound && "must not overflow register file");
    assert(v.type == AGX_INDEX_NORMAL && "only SSA gets registers allocated");
    rctx->ssa_to_reg[v.value] = reg;
 
@@ -227,15 +310,26 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
             return our_reg;
       }
 
+      unsigned collect_align = agx_size_align_16(collect->dest[0].size);
+      unsigned offset = our_source * align;
+
+      /* Prefer ranges of the register file that leave room for all sources of
+       * the collect contiguously.
+       */
+      for (unsigned base = 0; base + (collect->nr_srcs * align) <= rctx->bound;
+           base += collect_align) {
+         if (!BITSET_TEST_RANGE(rctx->used_regs, base,
+                                base + (collect->nr_srcs * align) - 1))
+            return base + offset;
+      }
+
       /* Try to respect the alignment requirement of the collect destination,
        * which may be greater than the sources (e.g. pack_64_2x32_split). Look
        * for a register for the source such that the collect base is aligned.
        */
-      unsigned collect_align = agx_size_align_16(collect->dest[0].size);
       if (collect_align > align) {
-         unsigned offset = our_source * align;
-
-         for (unsigned reg = offset; reg < rctx->bound; reg += collect_align) {
+         for (unsigned reg = offset; reg + collect_align <= rctx->bound;
+              reg += collect_align) {
             if (!BITSET_TEST_RANGE(rctx->used_regs, reg, reg + count - 1))
                return reg;
          }
@@ -251,7 +345,7 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
 static void
 agx_ra_assign_local(struct ra_ctx *rctx)
 {
-   BITSET_DECLARE(used_regs, AGX_NUM_REGS) = { 0 };
+   BITSET_DECLARE(used_regs, AGX_NUM_REGS) = {0};
 
    agx_block *block = rctx->block;
    uint8_t *ssa_to_reg = rctx->ssa_to_reg;
@@ -362,10 +456,9 @@ agx_insert_parallel_copies(agx_context *ctx, agx_block *block)
          agx_index src = phi->src[pred_index];
 
          assert(dest.type == AGX_INDEX_REGISTER);
-         assert(src.type == AGX_INDEX_REGISTER);
          assert(dest.size == src.size);
 
-         copies[i++] = (struct agx_copy) {
+         copies[i++] = (struct agx_copy){
             .dest = dest.value,
             .src = src,
          };
@@ -407,14 +500,14 @@ agx_ra(agx_context *ctx)
     * to a NIR invariant, so we do not need special handling for this.
     */
    agx_foreach_block(ctx, block) {
-      agx_ra_assign_local(&(struct ra_ctx) {
+      agx_ra_assign_local(&(struct ra_ctx){
          .shader = ctx,
          .block = block,
          .ssa_to_reg = ssa_to_reg,
          .src_to_collect = src_to_collect,
          .ncomps = ncomps,
          .visited = visited,
-         .bound = AGX_NUM_REGS
+         .bound = AGX_NUM_REGS,
       });
    }
 
@@ -437,7 +530,8 @@ agx_ra(agx_context *ctx)
 
       agx_foreach_ssa_dest(ins, d) {
          unsigned v = ssa_to_reg[ins->dest[d].value];
-         ins->dest[d] = agx_replace_index(ins->dest[d], agx_register(v, ins->dest[d].size));
+         ins->dest[d] =
+            agx_replace_index(ins->dest[d], agx_register(v, ins->dest[d].size));
       }
    }
 
@@ -455,12 +549,13 @@ agx_ra(agx_context *ctx)
 
          /* Move the sources */
          agx_foreach_src(ins, i) {
-            if (agx_is_null(ins->src[i])) continue;
+            if (agx_is_null(ins->src[i]) || ins->src[i].type == AGX_INDEX_UNDEF)
+               continue;
             assert(ins->src[i].size == ins->src[0].size);
 
-            copies[n++] = (struct agx_copy) {
+            copies[n++] = (struct agx_copy){
                .dest = base + (i * width),
-               .src = ins->src[i]
+               .src = ins->src[i],
             };
          }
 
@@ -482,9 +577,9 @@ agx_ra(agx_context *ctx)
             if (ins->dest[i].type != AGX_INDEX_REGISTER)
                continue;
 
-            copies[n++] = (struct agx_copy) {
+            copies[n++] = (struct agx_copy){
                .dest = ins->dest[i].value,
-               .src = agx_register(base + (i * width), ins->dest[i].size)
+               .src = agx_register(base + (i * width), ins->dest[i].size),
             };
          }
 
@@ -494,8 +589,6 @@ agx_ra(agx_context *ctx)
          agx_remove_instruction(ins);
          continue;
       }
-
-
    }
 
    /* Insert parallel copies lowering phi nodes */
@@ -507,7 +600,6 @@ agx_ra(agx_context *ctx)
       switch (I->op) {
       /* Pseudoinstructions for RA must be removed now */
       case AGX_OPCODE_PHI:
-      case AGX_OPCODE_LOGICAL_END:
       case AGX_OPCODE_PRELOAD:
          agx_remove_instruction(I);
          break;

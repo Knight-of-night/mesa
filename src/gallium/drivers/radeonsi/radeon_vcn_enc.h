@@ -116,7 +116,7 @@
 
 #define RENCODE_H264_DISABLE_DEBLOCKING_FILTER_IDC_ENABLE                           0
 #define RENCODE_H264_DISABLE_DEBLOCKING_FILTER_IDC_DISABLE                          1
-#define RENCODE_H264_DISABLE_DEBLOCKING_FILTER_IDC_DISALBE_ACROSS_SLICE_BOUNDARY    2
+#define RENCODE_H264_DISABLE_DEBLOCKING_FILTER_IDC_DISABLE_ACROSS_SLICE_BOUNDARY    2
 
 #define RENCODE_INTRA_REFRESH_MODE_NONE                                             0
 #define RENCODE_INTRA_REFRESH_MODE_CTB_MB_ROWS                                      1
@@ -140,6 +140,21 @@
 
 #define PIPE_H265_ENC_CTB_SIZE                                                      64
 #define PIPE_H264_MB_SIZE                                                           16
+
+#define RENCODE_COLOR_VOLUME_G22_BT709                                               0
+
+#define RENCODE_COLOR_RANGE_FULL                                                     0
+#define RENCODE_CHROMA_LOCATION_INTERSTITIAL                                         0
+
+#define RENCODE_COLOR_BIT_DEPTH_8_BIT                                                0
+#define RENCODE_COLOR_BIT_DEPTH_10_BIT                                               1
+
+#define RENCODE_CHROMA_SUBSAMPLING_4_2_0                                             0
+
+#define RENCODE_COLOR_PACKING_FORMAT_NV12                                            0
+#define RENCODE_COLOR_PACKING_FORMAT_P010                                            1
+
+#define RENCODE_COLOR_SPACE_YUV                                                      0
 
 #define PIPE_ALIGN_IN_BLOCK_SIZE(value, align) (((value) + ((align) - 1))/(align))
 
@@ -496,6 +511,25 @@ typedef struct rvcn_enc_vui_info_s
    uint32_t time_scale;
 }rvcn_enc_vui_info;
 
+typedef struct rvcn_enc_input_format_s
+{
+   uint32_t input_color_volume;
+   uint32_t input_color_space;
+   uint32_t input_color_range;
+   uint32_t input_chroma_subsampling;
+   uint32_t input_chroma_location;
+   uint32_t input_color_bit_depth;
+   uint32_t input_color_packing_format;
+} rvcn_enc_input_format_t;
+
+typedef struct rvcn_enc_output_format_s
+{
+   uint32_t output_color_volume;
+   uint32_t output_color_range;
+   uint32_t output_chroma_location;  /* chroma location to luma */
+   uint32_t output_color_bit_depth;
+} rvcn_enc_output_format_t;
+
 typedef void (*radeon_enc_get_buffer)(struct pipe_resource *resource, struct pb_buffer **handle,
                                       struct radeon_surf **surface);
 
@@ -573,6 +607,8 @@ struct radeon_enc_pic {
    rvcn_enc_intra_refresh_t intra_ref;
    rvcn_enc_encode_params_t enc_params;
    rvcn_enc_stats_t enc_statistics;
+   rvcn_enc_input_format_t enc_input_format;
+   rvcn_enc_output_format_t enc_output_format;
 };
 
 struct radeon_encoder {
@@ -660,6 +696,8 @@ struct radeon_encoder {
    unsigned dpb_size;
    rvcn_enc_picture_info_t dpb_info[RENCODE_MAX_NUM_RECONSTRUCTED_PICTURES];
    unsigned max_ltr_idx;
+
+   struct pipe_context *ectx;
 };
 
 void radeon_enc_add_buffer(struct radeon_encoder *enc, struct pb_buffer *buf,

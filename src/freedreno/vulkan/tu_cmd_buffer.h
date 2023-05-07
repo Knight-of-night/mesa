@@ -46,6 +46,7 @@ struct tu_descriptor_state
    struct tu_descriptor_set *sets[MAX_SETS];
    struct tu_descriptor_set push_set;
    uint32_t dynamic_descriptors[MAX_DYNAMIC_BUFFERS_SIZE];
+   uint64_t set_iova[MAX_SETS + 1];
    uint32_t max_sets_bound;
    bool dynamic_bound;
 };
@@ -57,8 +58,8 @@ enum tu_cmd_dirty_bits
    TU_CMD_DIRTY_RAST = BIT(2),
    TU_CMD_DIRTY_RB_DEPTH_CNTL = BIT(3),
    TU_CMD_DIRTY_RB_STENCIL_CNTL = BIT(4),
-   TU_CMD_DIRTY_DESC_SETS_LOAD = BIT(5),
-   TU_CMD_DIRTY_COMPUTE_DESC_SETS_LOAD = BIT(6),
+   TU_CMD_DIRTY_DESC_SETS = BIT(5),
+   TU_CMD_DIRTY_COMPUTE_DESC_SETS = BIT(6),
    TU_CMD_DIRTY_SHADER_CONSTS = BIT(7),
    TU_CMD_DIRTY_LRZ = BIT(8),
    TU_CMD_DIRTY_VS_PARAMS = BIT(9),
@@ -79,6 +80,7 @@ enum tu_cmd_dirty_bits
  */
 
 enum tu_cmd_access_mask {
+   TU_ACCESS_NONE = 0,
    TU_ACCESS_UCHE_READ = 1 << 0,
    TU_ACCESS_UCHE_WRITE = 1 << 1,
    TU_ACCESS_CCU_COLOR_READ = 1 << 2,
@@ -120,13 +122,20 @@ enum tu_cmd_access_mask {
     */
    TU_ACCESS_CP_WRITE = 1 << 12,
 
+   /* Descriptors are read through UCHE but are also prefetched via
+    * CP_LOAD_STATE6 and the prefetched descriptors need to be invalidated
+    * when they change.
+    */
+   TU_ACCESS_BINDLESS_DESCRIPTOR_READ = 1 << 13,
+
    TU_ACCESS_READ =
       TU_ACCESS_UCHE_READ |
       TU_ACCESS_CCU_COLOR_READ |
       TU_ACCESS_CCU_DEPTH_READ |
       TU_ACCESS_CCU_COLOR_INCOHERENT_READ |
       TU_ACCESS_CCU_DEPTH_INCOHERENT_READ |
-      TU_ACCESS_SYSMEM_READ,
+      TU_ACCESS_SYSMEM_READ |
+      TU_ACCESS_BINDLESS_DESCRIPTOR_READ,
 
    TU_ACCESS_WRITE =
       TU_ACCESS_UCHE_WRITE |
@@ -203,6 +212,7 @@ enum tu_cmd_flush_bits {
    TU_CMD_FLAG_WAIT_MEM_WRITES = 1 << 6,
    TU_CMD_FLAG_WAIT_FOR_IDLE = 1 << 7,
    TU_CMD_FLAG_WAIT_FOR_ME = 1 << 8,
+   TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE = 1 << 9,
 
    TU_CMD_FLAG_ALL_FLUSH =
       TU_CMD_FLAG_CCU_FLUSH_DEPTH |
@@ -217,6 +227,7 @@ enum tu_cmd_flush_bits {
       TU_CMD_FLAG_CCU_INVALIDATE_DEPTH |
       TU_CMD_FLAG_CCU_INVALIDATE_COLOR |
       TU_CMD_FLAG_CACHE_INVALIDATE |
+      TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE |
       /* Treat CP_WAIT_FOR_ME as a "cache" that needs to be invalidated when a
        * a command that needs CP_WAIT_FOR_ME is executed. This means we may
        * insert an extra WAIT_FOR_ME before an indirect command requiring it
@@ -242,9 +253,9 @@ struct tu_cache_state {
     * any users outside that cache domain, and caches which must be
     * invalidated eventually if there are any reads.
     */
-   enum tu_cmd_flush_bits pending_flush_bits;
+   BITMASK_ENUM(tu_cmd_flush_bits) pending_flush_bits;
    /* Pending flushes */
-   enum tu_cmd_flush_bits flush_bits;
+   BITMASK_ENUM(tu_cmd_flush_bits) flush_bits;
 };
 
 struct tu_vs_params {
@@ -301,6 +312,96 @@ struct tu_render_pass_state
     * just intended to be a rough estimate that is easy to calculate.
     */
    uint32_t drawcall_bandwidth_per_sample_sum;
+};
+
+/* These are the states of the suspend/resume state machine. In addition to
+ * tracking whether we're in the middle of a chain of suspending and
+ * resuming passes that will be merged, we need to track whether the
+ * command buffer begins in the middle of such a chain, for when it gets
+ * merged with other command buffers. We call such a chain that begins
+ * before the command buffer starts a "pre-chain".
+ *
+ * Note that when this command buffer is finished, this state is untouched
+ * but it gains a different meaning. For example, if we finish in state
+ * SR_IN_CHAIN, we finished in the middle of a suspend/resume chain, so
+ * there's a suspend/resume chain that extends past the end of the command
+ * buffer. In this sense it's the "opposite" of SR_AFTER_PRE_CHAIN, which
+ * means that there's a suspend/resume chain that extends before the
+ * beginning.
+ */
+enum tu_suspend_resume_state
+{
+   /* Either there are no suspend/resume chains, or they are entirely
+    * contained in the current command buffer.
+    *
+    *   BeginCommandBuffer() <- start of current command buffer
+    *       ...
+    *       // we are here
+    */
+   SR_NONE = 0,
+
+   /* We are in the middle of a suspend/resume chain that starts before the
+    * current command buffer. This happens when the command buffer begins
+    * with a resuming render pass and all of the passes up to the current
+    * one are suspending. In this state, our part of the chain is not saved
+    * and is in the current draw_cs/state.
+    *
+    *   BeginRendering() ... EndRendering(suspending)
+    *   BeginCommandBuffer() <- start of current command buffer
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       // we are here
+    */
+   SR_IN_PRE_CHAIN,
+
+   /* We are currently outside of any suspend/resume chains, but there is a
+    * chain starting before the current command buffer. It is saved in
+    * pre_chain.
+    *
+    *   BeginRendering() ... EndRendering(suspending)
+    *   BeginCommandBuffer() <- start of current command buffer
+    *       // This part is stashed in pre_chain
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       BeginRendering(resuming) ... EndRendering() // end of chain
+    *       ...
+    *       // we are here
+    */
+   SR_AFTER_PRE_CHAIN,
+
+   /* We are in the middle of a suspend/resume chain and there is no chain
+    * starting before the current command buffer.
+    *
+    *   BeginCommandBuffer() <- start of current command buffer
+    *       ...
+    *       BeginRendering() ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       // we are here
+    */
+   SR_IN_CHAIN,
+
+   /* We are in the middle of a suspend/resume chain and there is another,
+    * separate, chain starting before the current command buffer.
+    *
+    *   BeginRendering() ... EndRendering(suspending)
+    *   CommandBufferBegin() <- start of current command buffer
+    *       // This part is stashed in pre_chain
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       BeginRendering(resuming) ... EndRendering() // end of chain
+    *       ...
+    *       BeginRendering() ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       BeginRendering(resuming) ... EndRendering(suspending)
+    *       ...
+    *       // we are here
+    */
+   SR_IN_CHAIN_AFTER_PRE_CHAIN,
 };
 
 struct tu_cmd_state
@@ -429,94 +530,7 @@ struct tu_cmd_state
 
    bool prim_generated_query_running_before_rp;
 
-   /* These are the states of the suspend/resume state machine. In addition to
-    * tracking whether we're in the middle of a chain of suspending and
-    * resuming passes that will be merged, we need to track whether the
-    * command buffer begins in the middle of such a chain, for when it gets
-    * merged with other command buffers. We call such a chain that begins
-    * before the command buffer starts a "pre-chain".
-    *
-    * Note that when this command buffer is finished, this state is untouched
-    * but it gains a different meaning. For example, if we finish in state
-    * SR_IN_CHAIN, we finished in the middle of a suspend/resume chain, so
-    * there's a suspend/resume chain that extends past the end of the command
-    * buffer. In this sense it's the "opposite" of SR_AFTER_PRE_CHAIN, which
-    * means that there's a suspend/resume chain that extends before the
-    * beginning.
-    */
-   enum {
-      /* Either there are no suspend/resume chains, or they are entirely
-       * contained in the current command buffer.
-       *
-       *   BeginCommandBuffer() <- start of current command buffer
-       *       ...
-       *       // we are here
-       */
-      SR_NONE = 0,
-
-      /* We are in the middle of a suspend/resume chain that starts before the
-       * current command buffer. This happens when the command buffer begins
-       * with a resuming render pass and all of the passes up to the current
-       * one are suspending. In this state, our part of the chain is not saved
-       * and is in the current draw_cs/state.
-       *
-       *   BeginRendering() ... EndRendering(suspending)
-       *   BeginCommandBuffer() <- start of current command buffer
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       // we are here
-       */
-      SR_IN_PRE_CHAIN,
-
-      /* We are currently outside of any suspend/resume chains, but there is a
-       * chain starting before the current command buffer. It is saved in
-       * pre_chain.
-       *
-       *   BeginRendering() ... EndRendering(suspending)
-       *   BeginCommandBuffer() <- start of current command buffer
-       *       // This part is stashed in pre_chain
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       BeginRendering(resuming) ... EndRendering() // end of chain
-       *       ...
-       *       // we are here
-       */
-      SR_AFTER_PRE_CHAIN,
-
-      /* We are in the middle of a suspend/resume chain and there is no chain
-       * starting before the current command buffer.
-       *
-       *   BeginCommandBuffer() <- start of current command buffer
-       *       ...
-       *       BeginRendering() ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       // we are here
-       */
-      SR_IN_CHAIN,
-
-      /* We are in the middle of a suspend/resume chain and there is another,
-       * separate, chain starting before the current command buffer.
-       *
-       *   BeginRendering() ... EndRendering(suspending)
-       *   CommandBufferBegin() <- start of current command buffer
-       *       // This part is stashed in pre_chain
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       BeginRendering(resuming) ... EndRendering() // end of chain
-       *       ...
-       *       BeginRendering() ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       BeginRendering(resuming) ... EndRendering(suspending)
-       *       ...
-       *       // we are here
-       */
-      SR_IN_CHAIN_AFTER_PRE_CHAIN,
-   } suspend_resume;
+   enum tu_suspend_resume_state suspend_resume;
 
    bool suspending, resuming;
 
@@ -527,6 +541,8 @@ struct tu_cmd_state
    struct tu_vs_params last_vs_params;
 
    struct tu_primitive_params last_prim_params;
+
+   uint64_t descriptor_buffer_iova[MAX_SETS];
 };
 
 struct tu_cmd_buffer

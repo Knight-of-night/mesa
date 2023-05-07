@@ -105,11 +105,7 @@ lower_system_value_instr(nir_builder *b, nir_instr *instr, void *_state)
 
    case nir_intrinsic_load_helper_invocation:
       if (b->shader->options->lower_helper_invocation) {
-         nir_ssa_def *tmp;
-         tmp = nir_ishl(b, nir_imm_int(b, 1),
-                           nir_load_sample_id_no_per_sample(b));
-         tmp = nir_iand(b, nir_load_sample_mask_in(b), tmp);
-         return nir_inot(b, nir_i2b(b, tmp));
+         return nir_build_lowered_load_helper_invocation(b);
       } else {
          return NULL;
       }
@@ -133,12 +129,33 @@ lower_system_value_instr(nir_builder *b, nir_instr *instr, void *_state)
          assert(deref->deref_type == nir_deref_type_array);
          assert(deref->arr.index.is_ssa);
          column = deref->arr.index.ssa;
+         nir_deref_instr *arr_deref = deref;
          deref = nir_deref_instr_parent(deref);
          assert(deref->deref_type == nir_deref_type_var);
-         assert(deref->var->data.location == SYSTEM_VALUE_SAMPLE_MASK_IN ||
-                deref->var->data.location == SYSTEM_VALUE_RAY_OBJECT_TO_WORLD ||
-                deref->var->data.location == SYSTEM_VALUE_RAY_WORLD_TO_OBJECT ||
-                deref->var->data.location == SYSTEM_VALUE_MESH_VIEW_INDICES);
+
+         switch (deref->var->data.location) {
+         case SYSTEM_VALUE_TESS_LEVEL_INNER:
+         case SYSTEM_VALUE_TESS_LEVEL_OUTER: {
+            nir_ssa_def *index = nir_ssa_for_src(b, arr_deref->arr.index, 1);
+            nir_ssa_def *sysval = (deref->var->data.location ==
+                                   SYSTEM_VALUE_TESS_LEVEL_INNER)
+                                      ? nir_load_tess_level_inner(b)
+                                      : nir_load_tess_level_outer(b);
+            return nir_vector_extract(b, sysval, index);
+         }
+
+         case SYSTEM_VALUE_SAMPLE_MASK_IN:
+         case SYSTEM_VALUE_RAY_OBJECT_TO_WORLD:
+         case SYSTEM_VALUE_RAY_WORLD_TO_OBJECT:
+         case SYSTEM_VALUE_MESH_VIEW_INDICES:
+            /* These are all single-element arrays in our implementation, and
+             * the sysval load below just drops the 0 array index.
+             */
+            break;
+
+         default:
+            unreachable("unsupported system value array deref");
+         }
       }
       nir_variable *var = deref->var;
 
@@ -243,6 +260,16 @@ lower_system_value_instr(nir_builder *b, nir_instr *instr, void *_state)
    default:
       return NULL;
    }
+}
+
+nir_ssa_def *
+nir_build_lowered_load_helper_invocation(nir_builder *b)
+{
+   nir_ssa_def *tmp;
+   tmp = nir_ishl(b, nir_imm_int(b, 1),
+                  nir_load_sample_id_no_per_sample(b));
+   tmp = nir_iand(b, nir_load_sample_mask_in(b), tmp);
+   return nir_inot(b, nir_i2b(b, tmp));
 }
 
 bool

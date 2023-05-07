@@ -1029,9 +1029,15 @@ bool Converter::assignSlots() {
 
    uint8_t i;
    BITSET_FOREACH_SET(i, nir->info.system_values_read, SYSTEM_VALUE_MAX) {
-      info_out->sv[info_out->numSysVals].sn = tgsi_get_sysval_semantic(i);
-      info_out->sv[info_out->numSysVals].si = 0;
-      info_out->sv[info_out->numSysVals].input = 0;
+      switch (i) {
+      case SYSTEM_VALUE_BASE_GLOBAL_INVOCATION_ID:
+         continue;
+      default:
+         info_out->sv[info_out->numSysVals].sn = tgsi_get_sysval_semantic(i);
+         info_out->sv[info_out->numSysVals].si = 0;
+         info_out->sv[info_out->numSysVals].input = 0;
+         break;
+      }
 
       switch (i) {
       case SYSTEM_VALUE_VERTEX_ID:
@@ -1556,6 +1562,7 @@ Converter::visit(nir_if *nif)
 bool
 Converter::visit(nir_loop *loop)
 {
+   assert(!nir_loop_has_continue_construct(loop));
    curLoopDepth += 1;
    func->loopNestingBound = std::max(func->loopNestingBound, curLoopDepth);
 
@@ -2921,20 +2928,6 @@ Converter::visit(nir_alu_instr *insn)
       mkOp2(OP_MERGE, TYPE_U64, newDefs[0], loadImm(NULL, 0), tmp);
       break;
    }
-   case nir_op_f2b32:
-   case nir_op_i2b32: {
-      DEFAULT_CHECKS;
-      LValues &newDefs = convert(&insn->dest);
-      Value *src1;
-      if (typeSizeof(sTypes[0]) == 8) {
-         src1 = loadImm(getSSA(8), 0.0);
-      } else {
-         src1 = zero;
-      }
-      CondCode cc = op == nir_op_f2b32 ? CC_NEU : CC_NE;
-      mkCmp(OP_SET, cc, TYPE_U32, newDefs[0], sTypes[0], getSrc(&insn->src[0]), src1);
-      break;
-   }
    case nir_op_b2i8:
    case nir_op_b2i16:
    case nir_op_b2i32: {
@@ -3360,6 +3353,8 @@ Converter::run()
    NIR_PASS_V(nir, nir_lower_alu_to_scalar, NULL, NULL);
    NIR_PASS_V(nir, nir_lower_phis_to_scalar, false);
 
+   NIR_PASS_V(nir, nir_lower_frexp);
+
    /*TODO: improve this lowering/optimisation loop so that we can use
     *      nir_opt_idiv_const effectively before this.
     */
@@ -3392,6 +3387,8 @@ Converter::run()
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       NIR_PASS_V(nir, nv_nir_move_stores_to_end);
+
+   NIR_PASS(progress, nir, nir_opt_algebraic_late);
 
    NIR_PASS_V(nir, nir_lower_bool_to_int32);
    NIR_PASS_V(nir, nir_lower_bit_size, Converter::lowerBitSizeCB, this);

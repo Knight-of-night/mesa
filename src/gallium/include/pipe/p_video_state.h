@@ -44,6 +44,7 @@ extern "C" {
 #define PIPE_DEFAULT_FRAME_RATE_DEN   1
 #define PIPE_DEFAULT_FRAME_RATE_NUM   30
 #define PIPE_H2645_EXTENDED_SAR       255
+#define PIPE_DEFAULT_DECODER_FEEDBACK_TIMEOUT_NS 1000000000
 
 /*
  * see table 6-12 in the spec
@@ -142,7 +143,8 @@ enum pipe_h2645_enc_rate_control_method
    PIPE_H2645_ENC_RATE_CONTROL_METHOD_CONSTANT_SKIP = 0x01,
    PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE_SKIP = 0x02,
    PIPE_H2645_ENC_RATE_CONTROL_METHOD_CONSTANT = 0x03,
-   PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE = 0x04
+   PIPE_H2645_ENC_RATE_CONTROL_METHOD_VARIABLE = 0x04,
+   PIPE_H2645_ENC_RATE_CONTROL_METHOD_QUALITY_VARIABLE = 0x05
 };
 
 enum pipe_slice_buffer_placement_type
@@ -166,6 +168,8 @@ struct pipe_picture_desc
    uint32_t key_size;
    enum pipe_format input_format;
    enum pipe_format output_format;
+   /* A fence used on PIPE_VIDEO_ENTRYPOINT_DECODE to signal job completion */
+   struct pipe_fence_handle **fence;
 };
 
 struct pipe_quant_matrix
@@ -405,6 +409,8 @@ struct pipe_h264_enc_rate_control
    unsigned frame_rate_den;
    unsigned vbv_buffer_size;
    unsigned vbv_buf_lv;
+   unsigned vbv_buf_initial_size;
+   bool app_requested_hrd_buffer;
    unsigned target_bits_picture;
    unsigned peak_bits_picture_integer;
    unsigned peak_bits_picture_fraction;
@@ -414,6 +420,10 @@ struct pipe_h264_enc_rate_control
    unsigned max_au_size;
    unsigned max_qp;
    unsigned min_qp;
+   bool app_requested_qp_range;
+
+   /* Used with PIPE_H2645_ENC_RATE_CONTROL_METHOD_QUALITY_VARIABLE */
+   unsigned vbr_quality_factor;
 };
 
 struct pipe_h264_enc_motion_estimation
@@ -605,6 +615,8 @@ struct pipe_h265_enc_rate_control
    unsigned quant_b_frames;
    unsigned vbv_buffer_size;
    unsigned vbv_buf_lv;
+   unsigned vbv_buf_initial_size;
+   bool app_requested_hrd_buffer;
    unsigned target_bits_picture;
    unsigned peak_bits_picture_integer;
    unsigned peak_bits_picture_fraction;
@@ -614,6 +626,10 @@ struct pipe_h265_enc_rate_control
    unsigned max_au_size;
    unsigned max_qp;
    unsigned min_qp;
+   bool app_requested_qp_range;
+
+   /* Used with PIPE_H2645_ENC_RATE_CONTROL_METHOD_QUALITY_VARIABLE */
+   unsigned vbr_quality_factor;
 };
 
 struct pipe_h265_enc_picture_desc
@@ -790,6 +806,10 @@ struct pipe_mjpeg_picture_desc
       } components[255];
 
       uint8_t num_components;
+      uint16_t crop_x;
+      uint16_t crop_y;
+      uint16_t crop_width;
+      uint16_t crop_height;
    } picture_parameter;
 
    struct
@@ -864,12 +884,15 @@ struct pipe_vp9_picture_desc
    struct {
       uint16_t frame_width;
       uint16_t frame_height;
+      uint16_t prev_frame_width;
+      uint16_t prev_frame_height;
 
       struct {
          uint32_t  subsampling_x:1;
          uint32_t  subsampling_y:1;
          uint32_t  frame_type:1;
          uint32_t  show_frame:1;
+         uint32_t  prev_show_frame:1;
          uint32_t  error_resilient_mode:1;
          uint32_t  intra_only:1;
          uint32_t  allow_high_precision_mv:1;
@@ -1035,6 +1058,7 @@ struct pipe_av1_picture_desc
          uint32_t disable_frame_end_update_cdf:1;
          uint32_t uniform_tile_spacing_flag:1;
          uint32_t allow_warped_motion:1;
+         uint32_t large_scale_tile:1;
       } pic_info_fields;
 
       uint8_t superres_scale_denominator;

@@ -279,8 +279,7 @@ lp_setup_triangle_ccw(struct lp_setup_context *setup,
 struct lp_rast_triangle *
 lp_setup_alloc_triangle(struct lp_scene *scene,
                         unsigned num_inputs,
-                        unsigned nr_planes,
-                        unsigned *tri_size);
+                        unsigned nr_planes);
 
 struct lp_rast_rectangle *
 lp_setup_alloc_rectangle(struct lp_scene *scene,
@@ -305,6 +304,14 @@ boolean
 lp_setup_bin_rectangle(struct lp_setup_context *setup,
                        struct lp_rast_rectangle *rect,
                        boolean opaque);
+
+static inline boolean
+lp_setup_zero_sample_mask(struct lp_setup_context *setup)
+{
+   uint32_t sample_mask = setup->fs.current.jit_context.sample_mask;
+   return sample_mask == 0 ||
+          (!setup->multisample && (sample_mask & 1) == 0);
+}
 
 
 #endif

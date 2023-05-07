@@ -32,18 +32,22 @@
 #include "hwdef/rogue_hw_defs.h"
 #include "hwdef/rogue_hw_utils.h"
 #include "pvr_bo.h"
+#include "pvr_clear.h"
+#include "pvr_common.h"
 #include "pvr_csb.h"
 #include "pvr_csb_enum_helpers.h"
 #include "pvr_device_info.h"
-#include "pvr_end_of_tile.h"
 #include "pvr_formats.h"
+#include "pvr_hardcode.h"
 #include "pvr_hw_pass.h"
 #include "pvr_job_common.h"
 #include "pvr_job_render.h"
 #include "pvr_limits.h"
 #include "pvr_pds.h"
 #include "pvr_private.h"
+#include "pvr_tex_state.h"
 #include "pvr_types.h"
+#include "pvr_uscgen.h"
 #include "pvr_winsys.h"
 #include "util/bitscan.h"
 #include "util/bitset.h"
@@ -51,6 +55,7 @@
 #include "util/list.h"
 #include "util/macros.h"
 #include "util/u_dynarray.h"
+#include "util/u_math.h"
 #include "util/u_pack_color.h"
 #include "vk_alloc.h"
 #include "vk_command_buffer.h"
@@ -91,6 +96,7 @@ static void pvr_cmd_buffer_free_sub_cmd(struct pvr_cmd_buffer *cmd_buffer,
       case PVR_SUB_CMD_TYPE_GRAPHICS:
          util_dynarray_fini(&sub_cmd->gfx.sec_query_indices);
          pvr_csb_finish(&sub_cmd->gfx.control_stream);
+         pvr_bo_free(cmd_buffer->device, sub_cmd->gfx.terminate_ctrl_stream);
          pvr_bo_free(cmd_buffer->device, sub_cmd->gfx.depth_bias_bo);
          pvr_bo_free(cmd_buffer->device, sub_cmd->gfx.scissor_bo);
          break;
@@ -150,6 +156,7 @@ static void pvr_cmd_buffer_free_resources(struct pvr_cmd_buffer *cmd_buffer)
       pvr_bo_free(cmd_buffer->device, bo);
    }
 
+   util_dynarray_fini(&cmd_buffer->deferred_clears);
    util_dynarray_fini(&cmd_buffer->deferred_csb_commands);
    util_dynarray_fini(&cmd_buffer->scissor_array);
    util_dynarray_fini(&cmd_buffer->depth_bias_array);
@@ -217,6 +224,7 @@ static VkResult pvr_cmd_buffer_create(struct pvr_device *device,
    util_dynarray_init(&cmd_buffer->depth_bias_array, NULL);
    util_dynarray_init(&cmd_buffer->scissor_array, NULL);
    util_dynarray_init(&cmd_buffer->deferred_csb_commands, NULL);
+   util_dynarray_init(&cmd_buffer->deferred_clears, NULL);
 
    cmd_buffer->state.status = VK_SUCCESS;
 
@@ -343,22 +351,25 @@ err_free_depth_bias_bo:
 }
 
 static VkResult
-pvr_cmd_buffer_emit_ppp_state(struct pvr_cmd_buffer *cmd_buffer,
-                              struct pvr_sub_cmd_gfx *const sub_cmd)
+pvr_cmd_buffer_emit_ppp_state(const struct pvr_cmd_buffer *const cmd_buffer,
+                              struct pvr_csb *const csb)
 {
-   struct pvr_framebuffer *framebuffer =
+   const struct pvr_framebuffer *const framebuffer =
       cmd_buffer->state.render_pass_info.framebuffer;
 
-   pvr_csb_emit (&sub_cmd->control_stream, VDMCTRL_PPP_STATE0, state0) {
+   assert(csb->stream_type == PVR_CMD_STREAM_TYPE_GRAPHICS ||
+          csb->stream_type == PVR_CMD_STREAM_TYPE_GRAPHICS_DEFERRED);
+
+   pvr_csb_emit (csb, VDMCTRL_PPP_STATE0, state0) {
       state0.addrmsb = framebuffer->ppp_state_bo->vma->dev_addr;
       state0.word_count = framebuffer->ppp_state_size;
    }
 
-   pvr_csb_emit (&sub_cmd->control_stream, VDMCTRL_PPP_STATE1, state1) {
+   pvr_csb_emit (csb, VDMCTRL_PPP_STATE1, state1) {
       state1.addrlsb = framebuffer->ppp_state_bo->vma->dev_addr;
    }
 
-   return VK_SUCCESS;
+   return csb->status;
 }
 
 VkResult pvr_cmd_buffer_upload_general(struct pvr_cmd_buffer *const cmd_buffer,
@@ -419,16 +430,15 @@ pvr_cmd_buffer_upload_usc(struct pvr_cmd_buffer *const cmd_buffer,
    return VK_SUCCESS;
 }
 
-static VkResult
-pvr_cmd_buffer_upload_pds(struct pvr_cmd_buffer *const cmd_buffer,
-                          const uint32_t *data,
-                          uint32_t data_size_dwords,
-                          uint32_t data_alignment,
-                          const uint32_t *code,
-                          uint32_t code_size_dwords,
-                          uint32_t code_alignment,
-                          uint64_t min_alignment,
-                          struct pvr_pds_upload *const pds_upload_out)
+VkResult pvr_cmd_buffer_upload_pds(struct pvr_cmd_buffer *const cmd_buffer,
+                                   const uint32_t *data,
+                                   uint32_t data_size_dwords,
+                                   uint32_t data_alignment,
+                                   const uint32_t *code,
+                                   uint32_t code_size_dwords,
+                                   uint32_t code_alignment,
+                                   uint64_t min_alignment,
+                                   struct pvr_pds_upload *const pds_upload_out)
 {
    struct pvr_device *const device = cmd_buffer->device;
    VkResult result;
@@ -470,9 +480,13 @@ pvr_cmd_buffer_upload_pds_data(struct pvr_cmd_buffer *const cmd_buffer,
                                     pds_upload_out);
 }
 
+/* pbe_cs_words must be an array of length emit_count with
+ * ROGUE_NUM_PBESTATE_STATE_WORDS entries
+ */
 static VkResult pvr_sub_cmd_gfx_per_job_fragment_programs_create_and_upload(
    struct pvr_cmd_buffer *const cmd_buffer,
-   const uint32_t pbe_cs_words[static const ROGUE_NUM_PBESTATE_STATE_WORDS],
+   const uint32_t emit_count,
+   const uint32_t *pbe_cs_words,
    struct pvr_pds_upload *const pds_upload_out)
 {
    struct pvr_pds_event_program pixel_event_program = {
@@ -483,33 +497,29 @@ static VkResult pvr_sub_cmd_gfx_per_job_fragment_programs_create_and_upload(
       cmd_buffer->device->pixel_event_data_size_in_dwords * sizeof(uint32_t);
    const VkAllocationCallbacks *const allocator = &cmd_buffer->vk.pool->alloc;
    struct pvr_device *const device = cmd_buffer->device;
-   /* FIXME: This should come from the compiler for the USC pixel program. */
-   const uint32_t usc_temp_count = 0;
-   struct pvr_bo *usc_eot_program;
-   uint8_t *usc_eot_program_ptr;
+   struct util_dynarray eot_program_bin;
+   struct pvr_bo *usc_eot_program = NULL;
    uint32_t *staging_buffer;
+   uint32_t usc_temp_count;
    VkResult result;
 
+   assert(emit_count > 0);
+
+   pvr_uscgen_per_job_eot(emit_count,
+                          pbe_cs_words,
+                          &usc_temp_count,
+                          &eot_program_bin);
+
    result = pvr_cmd_buffer_upload_usc(cmd_buffer,
-                                      pvr_end_of_tile_program,
-                                      sizeof(pvr_end_of_tile_program),
+                                      eot_program_bin.data,
+                                      eot_program_bin.size,
                                       4,
                                       &usc_eot_program);
+
+   util_dynarray_fini(&eot_program_bin);
+
    if (result != VK_SUCCESS)
       return result;
-
-   assert((pbe_cs_words[1] & 0x3F) == 0x20);
-
-   /* FIXME: Stop patching the framebuffer address (this will require the
-    * end-of-tile program to be generated at run-time).
-    */
-   pvr_bo_cpu_map(device, usc_eot_program);
-   usc_eot_program_ptr = usc_eot_program->bo->map;
-   usc_eot_program_ptr[6] = (pbe_cs_words[0] >> 0) & 0xFF;
-   usc_eot_program_ptr[7] = (pbe_cs_words[0] >> 8) & 0xFF;
-   usc_eot_program_ptr[8] = (pbe_cs_words[0] >> 16) & 0xFF;
-   usc_eot_program_ptr[9] = (pbe_cs_words[0] >> 24) & 0xFF;
-   pvr_bo_cpu_unmap(device, usc_eot_program);
 
    pvr_pds_setup_doutu(&pixel_event_program.task_control,
                        usc_eot_program->vma->dev_addr.addr,
@@ -560,6 +570,89 @@ err_free_usc_pixel_program:
    return result;
 }
 
+static VkResult pvr_sub_cmd_gfx_build_terminate_ctrl_stream(
+   struct pvr_device *const device,
+   const struct pvr_cmd_buffer *const cmd_buffer,
+   struct pvr_sub_cmd_gfx *const gfx_sub_cmd)
+{
+   struct list_head bo_list;
+   struct pvr_csb csb;
+   VkResult result;
+
+   pvr_csb_init(device, PVR_CMD_STREAM_TYPE_GRAPHICS, &csb);
+
+   result = pvr_cmd_buffer_emit_ppp_state(cmd_buffer, &csb);
+   if (result != VK_SUCCESS)
+      goto err_csb_finish;
+
+   result = pvr_csb_emit_terminate(&csb);
+   if (result != VK_SUCCESS)
+      goto err_csb_finish;
+
+   result = pvr_csb_bake(&csb, &bo_list);
+   if (result != VK_SUCCESS)
+      goto err_csb_finish;
+
+   /* This is a trivial control stream, there's no reason it should ever require
+    * more memory than a single bo can provide.
+    */
+   assert(list_is_singular(&bo_list));
+   gfx_sub_cmd->terminate_ctrl_stream =
+      list_first_entry(&bo_list, struct pvr_bo, link);
+
+   return VK_SUCCESS;
+
+err_csb_finish:
+   pvr_csb_finish(&csb);
+
+   return result;
+}
+
+static VkResult pvr_setup_texture_state_words(
+   struct pvr_device *device,
+   struct pvr_combined_image_sampler_descriptor *descriptor,
+   const struct pvr_image_view *image_view)
+{
+   const struct pvr_image *image = vk_to_pvr_image(image_view->vk.image);
+   struct pvr_texture_state_info info = {
+      .format = image_view->vk.format,
+      .mem_layout = image->memlayout,
+      .type = image_view->vk.view_type,
+      .is_cube = image_view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE ||
+                 image_view->vk.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY,
+      .tex_state_type = PVR_TEXTURE_STATE_SAMPLE,
+      .extent = image_view->vk.extent,
+      .mip_levels = 1,
+      .sample_count = image_view->vk.image->samples,
+      .stride = image->physical_extent.width,
+      .addr = image->dev_addr,
+   };
+   const uint8_t *const swizzle = pvr_get_format_swizzle(info.format);
+   VkResult result;
+
+   memcpy(&info.swizzle, swizzle, sizeof(info.swizzle));
+
+   /* TODO: Can we use image_view->texture_state instead of generating here? */
+   result = pvr_pack_tex_state(device, &info, descriptor->image);
+   if (result != VK_SUCCESS)
+      return result;
+
+   descriptor->sampler = (union pvr_sampler_descriptor){ 0 };
+
+   pvr_csb_pack (&descriptor->sampler.data.sampler_word,
+                 TEXSTATE_SAMPLER,
+                 sampler) {
+      sampler.non_normalized_coords = true;
+      sampler.addrmode_v = PVRX(TEXSTATE_ADDRMODE_CLAMP_TO_EDGE);
+      sampler.addrmode_u = PVRX(TEXSTATE_ADDRMODE_CLAMP_TO_EDGE);
+      sampler.minfilter = PVRX(TEXSTATE_FILTER_POINT);
+      sampler.magfilter = PVRX(TEXSTATE_FILTER_POINT);
+      sampler.dadjust = PVRX(TEXSTATE_DADJUST_ZERO_UINT);
+   }
+
+   return VK_SUCCESS;
+}
+
 static VkResult
 pvr_load_op_constants_create_and_upload(struct pvr_cmd_buffer *cmd_buffer,
                                         const struct pvr_load_op *load_op,
@@ -571,29 +664,108 @@ pvr_load_op_constants_create_and_upload(struct pvr_cmd_buffer *cmd_buffer,
    const struct pvr_renderpass_hwsetup_render *hw_render = load_op->hw_render;
    const struct pvr_renderpass_colorinit *color_init =
       &hw_render->color_init[0];
-   const struct pvr_render_pass_attachment *attachment =
-      &pass->attachments[color_init->index];
    const VkClearValue *clear_value =
       &render_pass_info->clear_values[color_init->index];
-   uint32_t hw_clear_value[PVR_CLEAR_COLOR_ARRAY_SIZE];
+   uint32_t attachment_count;
    struct pvr_bo *clear_bo;
+   bool has_depth_clear;
+   bool has_depth_load;
    VkResult result;
 
-   pvr_finishme("Add missing load op data support");
+   /* These are only setup and never used for now. These will need to be
+    * uploaded into a buffer based on some compiler info.
+    */
+   /* TODO: Remove the above comment once the compiler is hooked up and we're
+    * setting up + uploading the buffer.
+    */
+   struct pvr_combined_image_sampler_descriptor
+      texture_states[PVR_LOAD_OP_CLEARS_LOADS_MAX_RTS];
+   uint32_t texture_count = 0;
+   uint32_t hw_clear_value[PVR_LOAD_OP_CLEARS_LOADS_MAX_RTS *
+                           PVR_CLEAR_COLOR_ARRAY_SIZE];
+   uint32_t next_clear_consts = 0;
 
-   assert(load_op->is_hw_object);
-   assert(hw_render->color_init_count == 1);
+   if (load_op->is_hw_object)
+      attachment_count = load_op->hw_render->color_init_count;
+   else
+      attachment_count = load_op->subpass->color_count;
 
-   assert(vk_format_get_blocksize(attachment->vk_format) <=
-          sizeof(hw_clear_value));
+   for (uint32_t i = 0; i < attachment_count; i++) {
+      struct pvr_image_view *image_view;
+      uint32_t attachment_idx;
 
-   /* FIXME: add support for VK_ATTACHMENT_LOAD_OP_LOAD. */
-   assert(color_init->op == VK_ATTACHMENT_LOAD_OP_CLEAR);
+      if (load_op->is_hw_object)
+         attachment_idx = load_op->hw_render->color_init[i].index;
+      else
+         attachment_idx = load_op->subpass->color_attachments[i];
 
-   /* FIXME: do this at the point we store the clear values? */
-   pvr_get_hw_clear_color(attachment->vk_format,
-                          clear_value->color,
-                          hw_clear_value);
+      image_view = render_pass_info->attachments[attachment_idx];
+
+      assert((load_op->clears_loads_state.rt_load_mask &
+              load_op->clears_loads_state.rt_clear_mask) == 0);
+      if (load_op->clears_loads_state.rt_load_mask & BITFIELD_BIT(i)) {
+         result = pvr_setup_texture_state_words(cmd_buffer->device,
+                                                &texture_states[texture_count],
+                                                image_view);
+         if (result != VK_SUCCESS)
+            return result;
+
+         texture_count++;
+      } else if (load_op->clears_loads_state.rt_clear_mask & BITFIELD_BIT(i)) {
+         const uint32_t accum_fmt_size =
+            pvr_get_pbe_accum_format_size_in_bytes(image_view->vk.format);
+
+         assert(next_clear_consts +
+                   vk_format_get_blocksize(image_view->vk.format) <=
+                ARRAY_SIZE(hw_clear_value));
+
+         /* FIXME: do this at the point we store the clear values? */
+         pvr_get_hw_clear_color(image_view->vk.format,
+                                clear_value->color,
+                                &hw_clear_value[next_clear_consts]);
+
+         next_clear_consts += DIV_ROUND_UP(accum_fmt_size, sizeof(uint32_t));
+      }
+   }
+
+   has_depth_load = load_op->clears_loads_state.rt_load_mask != 0;
+   has_depth_clear = load_op->clears_loads_state.depth_clear_to_reg != -1;
+
+   assert(!(has_depth_clear && has_depth_load));
+
+   if (has_depth_load) {
+      const struct pvr_render_pass_attachment *attachment;
+      const struct pvr_image_view *image_view;
+
+      assert(load_op->subpass->depth_stencil_attachment !=
+             VK_ATTACHMENT_UNUSED);
+      assert(!load_op->is_hw_object);
+      attachment =
+         &pass->attachments[load_op->subpass->depth_stencil_attachment];
+
+      image_view = render_pass_info->attachments[attachment->index];
+
+      result = pvr_setup_texture_state_words(cmd_buffer->device,
+                                             &texture_states[texture_count],
+                                             image_view);
+      if (result != VK_SUCCESS)
+         return result;
+
+      texture_count++;
+   } else if (has_depth_clear) {
+      const struct pvr_render_pass_attachment *attachment;
+      VkClearValue clear_value;
+
+      assert(load_op->subpass->depth_stencil_attachment !=
+             VK_ATTACHMENT_UNUSED);
+      attachment =
+         &pass->attachments[load_op->subpass->depth_stencil_attachment];
+
+      clear_value = render_pass_info->clear_values[attachment->index];
+
+      assert(next_clear_consts < ARRAY_SIZE(hw_clear_value));
+      hw_clear_value[next_clear_consts++] = fui(clear_value.depthStencil.depth);
+   }
 
    result = pvr_cmd_buffer_upload_general(cmd_buffer,
                                           &hw_clear_value[0],
@@ -737,7 +909,7 @@ static inline uint32_t pvr_stride_from_pitch(uint32_t pitch, VkFormat vk_format)
 
 static void pvr_setup_pbe_state(
    const struct pvr_device_info *dev_info,
-   struct pvr_framebuffer *framebuffer,
+   const struct pvr_framebuffer *framebuffer,
    uint32_t mrt_index,
    const struct usc_mrt_resource *mrt_resource,
    const struct pvr_image_view *const iview,
@@ -764,16 +936,8 @@ static void pvr_setup_pbe_state(
    /* Setup surface parameters. */
 
    if (PVR_HAS_FEATURE(dev_info, usc_f16sop_u8)) {
-      switch (iview->vk.format) {
-      case VK_FORMAT_B8G8R8A8_UNORM:
-         with_packed_usc_channel = true;
-         break;
-      case VK_FORMAT_D32_SFLOAT:
-         with_packed_usc_channel = false;
-         break;
-      default:
-         unreachable("Unsupported Vulkan image format");
-      }
+      with_packed_usc_channel = vk_format_is_unorm(iview->vk.format) ||
+                                vk_format_is_snorm(iview->vk.format);
    } else {
       with_packed_usc_channel = false;
    }
@@ -805,7 +969,6 @@ static void pvr_setup_pbe_state(
    surface_params.height = iview->vk.extent.height;
    surface_params.z_only_render = false;
    surface_params.down_scale = down_scale;
-   surface_params.msaa_mode = samples;
 
    /* Setup render parameters. */
 
@@ -946,6 +1109,75 @@ pvr_sub_cmd_gfx_align_zls_subtiles(const struct pvr_device_info *dev_info,
              zls_tile_size_y);
 }
 
+struct pvr_emit_state {
+   uint32_t pbe_cs_words[PVR_MAX_COLOR_ATTACHMENTS]
+                        [ROGUE_NUM_PBESTATE_STATE_WORDS];
+
+   uint64_t pbe_reg_words[PVR_MAX_COLOR_ATTACHMENTS]
+                         [ROGUE_NUM_PBESTATE_REG_WORDS];
+
+   uint32_t emit_count;
+};
+
+static void
+pvr_setup_emit_state(const struct pvr_device_info *dev_info,
+                     const struct pvr_renderpass_hwsetup_render *hw_render,
+                     struct pvr_render_pass_info *render_pass_info,
+                     struct pvr_emit_state *emit_state)
+{
+   assert(hw_render->eot_surface_count < PVR_MAX_COLOR_ATTACHMENTS);
+
+   if (hw_render->eot_surface_count == 0) {
+      emit_state->emit_count = 1;
+      pvr_csb_pack (&emit_state->pbe_cs_words[0][1],
+                    PBESTATE_STATE_WORD1,
+                    state) {
+         state.emptytile = true;
+      }
+      return;
+   }
+
+   emit_state->emit_count = hw_render->eot_surface_count;
+
+   for (uint32_t i = 0; i < hw_render->eot_surface_count; i++) {
+      const struct pvr_framebuffer *framebuffer = render_pass_info->framebuffer;
+      const struct pvr_renderpass_hwsetup_eot_surface *surface =
+         &hw_render->eot_surfaces[i];
+      const struct pvr_image_view *iview =
+         render_pass_info->attachments[surface->attachment_idx];
+      const struct usc_mrt_resource *mrt_resource =
+         &hw_render->eot_setup.mrt_resources[surface->mrt_idx];
+      uint32_t samples = 1;
+
+      if (surface->need_resolve) {
+         const struct pvr_image_view *resolve_src =
+            render_pass_info->attachments[surface->src_attachment_idx];
+
+         /* Attachments that are the destination of resolve operations must
+          * be loaded before their next use.
+          */
+         render_pass_info->enable_bg_tag = true;
+         render_pass_info->process_empty_tiles = true;
+
+         if (surface->resolve_type != PVR_RESOLVE_TYPE_PBE)
+            continue;
+
+         samples = (uint32_t)resolve_src->vk.image->samples;
+      }
+
+      pvr_setup_pbe_state(dev_info,
+                          framebuffer,
+                          surface->mrt_idx,
+                          mrt_resource,
+                          iview,
+                          &render_pass_info->render_area,
+                          surface->need_resolve,
+                          samples,
+                          emit_state->pbe_cs_words[i],
+                          emit_state->pbe_reg_words[i]);
+   }
+}
+
 static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
                                          struct pvr_cmd_buffer *cmd_buffer,
                                          struct pvr_sub_cmd_gfx *sub_cmd)
@@ -963,63 +1195,39 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
       &render_pass_info->pass->hw_setup->renders[sub_cmd->hw_render_idx];
    struct pvr_render_job *job = &sub_cmd->job;
    struct pvr_pds_upload pds_pixel_event_program;
-   uint32_t pbe_cs_words[PVR_MAX_COLOR_ATTACHMENTS]
-                        [ROGUE_NUM_PBESTATE_STATE_WORDS] = { 0 };
+   struct pvr_framebuffer *framebuffer = render_pass_info->framebuffer;
+   struct pvr_spm_bgobj_state *spm_bgobj_state =
+      &framebuffer->spm_bgobj_state_per_render[sub_cmd->hw_render_idx];
+   struct pvr_emit_state emit_state = { 0 };
    struct pvr_render_target *render_target;
    VkResult result;
 
-   assert(hw_render->eot_surface_count < ARRAY_SIZE(pbe_cs_words));
+   pvr_setup_emit_state(dev_info, hw_render, render_pass_info, &emit_state);
 
-   for (uint32_t i = 0; i < hw_render->eot_surface_count; i++) {
-      const struct pvr_renderpass_hwsetup_eot_surface *surface =
-         &hw_render->eot_surfaces[i];
-      const struct pvr_image_view *iview =
-         render_pass_info->attachments[surface->attachment_idx];
-      const struct usc_mrt_resource *mrt_resource =
-         &hw_render->eot_setup.mrt_resources[surface->mrt_idx];
-      uint32_t samples = 1;
+   memcpy(job->pbe_reg_words,
+          emit_state.pbe_reg_words,
+          sizeof(emit_state.pbe_reg_words));
 
-      if (surface->need_resolve) {
-         const struct pvr_image_view *resolve_src =
-            render_pass_info->attachments[surface->src_attachment_idx];
-
-         /* Attachments that are the destination of resolve operations must be
-          * loaded before their next use.
-          */
-         render_pass_info->enable_bg_tag = true;
-         render_pass_info->process_empty_tiles = true;
-
-         if (surface->resolve_type != PVR_RESOLVE_TYPE_PBE)
-            continue;
-
-         samples = (uint32_t)resolve_src->vk.image->samples;
-      }
-
-      pvr_setup_pbe_state(dev_info,
-                          render_pass_info->framebuffer,
-                          surface->mrt_idx,
-                          mrt_resource,
-                          iview,
-                          &render_pass_info->render_area,
-                          surface->need_resolve,
-                          samples,
-                          pbe_cs_words[i],
-                          job->pbe_reg_words[i]);
-   }
-
-   /* FIXME: The fragment program only supports a single surface at present. */
-   assert(hw_render->eot_surface_count == 1);
    result = pvr_sub_cmd_gfx_per_job_fragment_programs_create_and_upload(
       cmd_buffer,
-      pbe_cs_words[0],
+      emit_state.emit_count,
+      emit_state.pbe_cs_words[0],
       &pds_pixel_event_program);
    if (result != VK_SUCCESS)
       return result;
 
    job->pds_pixel_event_data_offset = pds_pixel_event_program.data_offset;
 
-   /* FIXME: Don't do this if there is a barrier load. */
-   if (render_pass_info->enable_bg_tag) {
+   if (sub_cmd->barrier_load) {
+      job->enable_bg_tag = true;
+      job->process_empty_tiles = true;
+
+      STATIC_ASSERT(ARRAY_SIZE(job->pds_pr_bgnd_reg_values) ==
+                    ARRAY_SIZE(spm_bgobj_state->pds_reg_values));
+      typed_memcpy(job->pds_bgnd_reg_values,
+                   spm_bgobj_state->pds_reg_values,
+                   ARRAY_SIZE(spm_bgobj_state->pds_reg_values));
+   } else if (render_pass_info->enable_bg_tag) {
       const struct pvr_load_op *load_op = hw_render->load_op;
       struct pvr_pds_upload load_op_program;
 
@@ -1032,16 +1240,22 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
       if (result != VK_SUCCESS)
          return result;
 
+      job->enable_bg_tag = render_pass_info->enable_bg_tag;
+      job->process_empty_tiles = render_pass_info->process_empty_tiles;
+
       pvr_pds_bgnd_pack_state(load_op,
                               &load_op_program,
                               job->pds_bgnd_reg_values);
    }
 
-   job->enable_bg_tag = render_pass_info->enable_bg_tag;
-   job->process_empty_tiles = render_pass_info->process_empty_tiles;
+   STATIC_ASSERT(ARRAY_SIZE(job->pds_pr_bgnd_reg_values) ==
+                 ARRAY_SIZE(spm_bgobj_state->pds_reg_values));
+   typed_memcpy(job->pds_pr_bgnd_reg_values,
+                spm_bgobj_state->pds_reg_values,
+                ARRAY_SIZE(spm_bgobj_state->pds_reg_values));
 
    render_target = pvr_get_render_target(render_pass_info->pass,
-                                         render_pass_info->framebuffer,
+                                         framebuffer,
                                          sub_cmd->hw_render_idx);
    job->rt_dataset = render_target->rt_dataset;
 
@@ -1162,13 +1376,22 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
    job->run_frag = true;
    job->geometry_terminate = true;
 
+   /* TODO: In some cases a PR can be removed by storing to the color attachment
+    * and have the background object load directly from it instead of using the
+    * scratch buffer. In those cases we can also set this to "false" and avoid
+    * extra fw overhead.
+    */
+   /* The scratch buffer is always needed and allocated to avoid data loss in
+    * case SPM is hit so set the flag unconditionally.
+    */
+   job->requires_spm_scratch_buffer = true;
+   /* FIXME: We should be using the SPM PBE reg words and the SPM EOT PDS data
+    * section instead of the regular, but for now we don't have an actual
+    * SPM EOT USC shader so that would cause problems.
+    */
+
    return VK_SUCCESS;
 }
-
-/* Number of shareds used in the Issue Data Fence(IDF)/Wait Data Fence(WDF)
- * kernel.
- */
-#define PVR_IDF_WDF_IN_REGISTER_CONST_COUNT 12U
 
 static void
 pvr_sub_cmd_compute_job_init(const struct pvr_physical_device *pdevice,
@@ -1461,6 +1684,24 @@ void pvr_compute_generate_fence(struct pvr_cmd_buffer *cmd_buffer,
    pvr_compute_generate_control_stream(csb, sub_cmd, &info);
 }
 
+static VkResult
+pvr_cmd_buffer_process_deferred_clears(struct pvr_cmd_buffer *cmd_buffer)
+{
+   util_dynarray_foreach (&cmd_buffer->deferred_clears,
+                          struct pvr_transfer_cmd,
+                          transfer_cmd) {
+      VkResult result;
+
+      result = pvr_cmd_buffer_add_transfer_cmd(cmd_buffer, transfer_cmd);
+      if (result != VK_SUCCESS)
+         return result;
+
+      cmd_buffer->state.current_sub_cmd->transfer.serialize_with_frag = true;
+   }
+
+   return VK_SUCCESS;
+}
+
 VkResult pvr_cmd_buffer_end_sub_cmd(struct pvr_cmd_buffer *cmd_buffer)
 {
    struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
@@ -1535,13 +1776,28 @@ VkResult pvr_cmd_buffer_end_sub_cmd(struct pvr_cmd_buffer *cmd_buffer)
        * sub_cmd->gfx.empty_cmd flag.
        */
 
+      /* TODO: Set the state in the functions called with the command buffer
+       * instead of here.
+       */
+
       result = pvr_cmd_buffer_upload_tables(device, cmd_buffer, gfx_sub_cmd);
       if (result != VK_SUCCESS) {
          state->status = result;
          return result;
       }
 
-      result = pvr_cmd_buffer_emit_ppp_state(cmd_buffer, gfx_sub_cmd);
+      if (pvr_sub_cmd_gfx_requires_split_submit(gfx_sub_cmd)) {
+         result = pvr_sub_cmd_gfx_build_terminate_ctrl_stream(device,
+                                                              cmd_buffer,
+                                                              gfx_sub_cmd);
+         if (result != VK_SUCCESS) {
+            state->status = result;
+            return result;
+         }
+      }
+
+      result = pvr_cmd_buffer_emit_ppp_state(cmd_buffer,
+                                             &gfx_sub_cmd->control_stream);
       if (result != VK_SUCCESS) {
          state->status = result;
          return result;
@@ -1556,6 +1812,12 @@ VkResult pvr_cmd_buffer_end_sub_cmd(struct pvr_cmd_buffer *cmd_buffer)
       result = pvr_sub_cmd_gfx_job_init(&device->pdevice->dev_info,
                                         cmd_buffer,
                                         gfx_sub_cmd);
+      if (result != VK_SUCCESS) {
+         state->status = result;
+         return result;
+      }
+
+      result = pvr_cmd_buffer_process_deferred_clears(cmd_buffer);
       if (result != VK_SUCCESS) {
          state->status = result;
          return result;
@@ -1637,9 +1899,8 @@ VkResult pvr_cmd_buffer_end_sub_cmd(struct pvr_cmd_buffer *cmd_buffer)
    return VK_SUCCESS;
 }
 
-static void
-pvr_reset_graphics_dirty_state(struct pvr_cmd_buffer *const cmd_buffer,
-                               bool start_geom)
+void pvr_reset_graphics_dirty_state(struct pvr_cmd_buffer *const cmd_buffer,
+                                    bool start_geom)
 {
    struct vk_dynamic_graphics_state *const dynamic_state =
       &cmd_buffer->vk.dynamic_graphics_state;
@@ -2024,6 +2285,27 @@ void pvr_CmdBindDescriptorSets(VkCommandBuffer commandBuffer,
          descriptor_state->valid_mask |= (1u << index);
       }
    }
+
+   if (dynamicOffsetCount > 0) {
+      PVR_FROM_HANDLE(pvr_pipeline_layout, pipeline_layout, _layout);
+      uint32_t starting_idx = 0;
+
+      for (uint32_t set = 0; set < firstSet; set++)
+         starting_idx += pipeline_layout->set_layout[set]->dynamic_buffer_count;
+
+      assert(starting_idx + dynamicOffsetCount <=
+             ARRAY_SIZE(descriptor_state->dynamic_offsets));
+
+      /* From the Vulkan 1.3.238 spec. :
+       *
+       *    "If any of the sets being bound include dynamic uniform or storage
+       *    buffers, then pDynamicOffsets includes one element for each array
+       *    element in each dynamic descriptor type binding in each set."
+       *
+       */
+      for (uint32_t i = starting_idx; i < dynamicOffsetCount; i++)
+         descriptor_state->dynamic_offsets[i] = pDynamicOffsets[i];
+   }
 }
 
 void pvr_CmdBindVertexBuffers(VkCommandBuffer commandBuffer,
@@ -2094,6 +2376,7 @@ void pvr_CmdPushConstants(VkCommandBuffer commandBuffer,
    memcpy(&state->push_constants.data[offset], pValues, size);
 
    state->push_constants.dirty_stages |= stageFlags;
+   state->push_constants.uploaded = false;
 }
 
 static VkResult
@@ -2166,7 +2449,7 @@ static VkResult pvr_init_render_targets(struct pvr_device *device,
    return VK_SUCCESS;
 }
 
-static const struct pvr_renderpass_hwsetup_subpass *
+const struct pvr_renderpass_hwsetup_subpass *
 pvr_get_hw_subpass(const struct pvr_render_pass *pass, const uint32_t subpass)
 {
    const struct pvr_renderpass_hw_map *map =
@@ -2182,11 +2465,15 @@ static void pvr_perform_start_of_render_attachment_clear(
    bool is_depth_stencil,
    uint32_t *index_list_clear_mask)
 {
+   ASSERTED static const VkImageAspectFlags dsc_aspect_flags =
+      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT |
+      VK_IMAGE_ASPECT_COLOR_BIT;
    struct pvr_render_pass_info *info = &cmd_buffer->state.render_pass_info;
    const struct pvr_render_pass *pass = info->pass;
    const struct pvr_renderpass_hwsetup *hw_setup = pass->hw_setup;
    const struct pvr_renderpass_hwsetup_render *hw_render =
       &hw_setup->renders[hw_setup->subpass_map[info->subpass_idx].render];
+   VkImageAspectFlags image_aspect;
    struct pvr_image_view *iview;
    uint32_t view_idx;
    uint32_t height;
@@ -2237,7 +2524,37 @@ static void pvr_perform_start_of_render_attachment_clear(
       return;
    }
 
-   pvr_finishme("Unimplemented path!");
+   image_aspect = vk_format_aspects(pass->attachments[view_idx].vk_format);
+   assert((image_aspect & ~dsc_aspect_flags) == 0);
+
+   if (image_aspect & VK_IMAGE_ASPECT_DEPTH_BIT &&
+       hw_render->depth_init != VK_ATTACHMENT_LOAD_OP_CLEAR) {
+      image_aspect &= ~VK_IMAGE_ASPECT_DEPTH_BIT;
+   }
+
+   if (image_aspect & VK_IMAGE_ASPECT_STENCIL_BIT &&
+       hw_render->stencil_init != VK_ATTACHMENT_LOAD_OP_CLEAR) {
+      image_aspect &= ~VK_IMAGE_ASPECT_STENCIL_BIT;
+   }
+
+   if (image_aspect != VK_IMAGE_ASPECT_NONE) {
+      VkClearAttachment clear_attachment = {
+         .aspectMask = image_aspect,
+         .colorAttachment = index,
+         .clearValue = info->clear_values[view_idx],
+      };
+      VkClearRect rect = {
+         .rect = info->render_area,
+         .baseArrayLayer = 0,
+         .layerCount = info->framebuffer->layers,
+      };
+
+      assert(view_idx < info->clear_value_count);
+
+      pvr_clear_attachments_render_init(cmd_buffer, &clear_attachment, &rect);
+
+      *index_list_clear_mask |= (1 << index);
+   }
 }
 
 static void
@@ -2365,6 +2682,20 @@ pvr_cmd_buffer_set_clear_values(struct pvr_cmd_buffer *cmd_buffer,
    return VK_SUCCESS;
 }
 
+/**
+ * \brief Indicates whether to use the large or normal clear state words.
+ *
+ * If the current render area can fit within a quarter of the max framebuffer
+ * that the device is capable of, we can use the normal clear state words,
+ * otherwise the large clear state words are needed.
+ *
+ * The requirement of a quarter of the max framebuffer comes from the index
+ * count used in the normal clear state words and the vertices uploaded at
+ * device creation.
+ *
+ * \param[in] cmd_buffer The command buffer for the clear.
+ * \return true if large clear state words are required.
+ */
 static bool
 pvr_is_large_clear_required(const struct pvr_cmd_buffer *const cmd_buffer)
 {
@@ -2409,7 +2740,7 @@ static VkResult pvr_cs_write_load_op(struct pvr_cmd_buffer *cmd_buffer,
 {
    const struct pvr_device *device = cmd_buffer->device;
    struct pvr_static_clear_ppp_template template =
-      device->static_clear_state.ppp_templates[PVR_STATIC_CLEAR_COLOR_BIT];
+      device->static_clear_state.ppp_templates[VK_IMAGE_ASPECT_COLOR_BIT];
    uint32_t pds_state[PVR_STATIC_CLEAR_PDS_STATE_COUNT];
    struct pvr_pds_upload shareds_update_program;
    struct pvr_bo *pvr_bo;
@@ -2707,12 +3038,34 @@ pvr_setup_vertex_buffers(struct pvr_cmd_buffer *cmd_buffer,
          break;
       }
 
+      case PVR_PDS_CONST_MAP_ENTRY_TYPE_BASE_VERTEX: {
+         const struct pvr_const_map_entry_base_instance *const base_instance =
+            (struct pvr_const_map_entry_base_instance *)entries;
+
+         PVR_WRITE(dword_buffer,
+                   state->draw_state.base_vertex,
+                   base_instance->const_offset,
+                   pds_info->data_size_in_dwords);
+
+         entries += sizeof(*base_instance);
+         break;
+      }
+
       case PVR_PDS_CONST_MAP_ENTRY_TYPE_VERTEX_ATTRIBUTE_ADDRESS: {
          const struct pvr_const_map_entry_vertex_attribute_address
             *const attribute =
                (struct pvr_const_map_entry_vertex_attribute_address *)entries;
          const struct pvr_vertex_binding *const binding =
             &state->vertex_bindings[attribute->binding_index];
+         /* In relation to the Vulkan spec. 22.4. Vertex Input Address
+          * Calculation:
+          *    Adding binding->offset corresponds to calculating the
+          *    `bufferBindingAddress`. Adding attribute->offset corresponds to
+          *    adding the `attribDesc.offset`. The `effectiveVertexOffset` is
+          *    taken care by the PDS program itself with a DDMAD which will
+          *    multiply the vertex/instance idx with the binding's stride and
+          *    add that to the address provided here.
+          */
          const pvr_dev_addr_t addr =
             PVR_DEV_ADDR_OFFSET(binding->buffer->dev_addr,
                                 binding->offset + attribute->offset);
@@ -2723,6 +3076,79 @@ pvr_setup_vertex_buffers(struct pvr_cmd_buffer *cmd_buffer,
                    pds_info->data_size_in_dwords);
 
          entries += sizeof(*attribute);
+         break;
+      }
+
+      case PVR_PDS_CONST_MAP_ENTRY_TYPE_ROBUST_VERTEX_ATTRIBUTE_ADDRESS: {
+         const struct pvr_const_map_entry_robust_vertex_attribute_address
+            *const attribute =
+               (struct pvr_const_map_entry_robust_vertex_attribute_address *)
+                  entries;
+         const struct pvr_vertex_binding *const binding =
+            &state->vertex_bindings[attribute->binding_index];
+         pvr_dev_addr_t addr;
+
+         if (binding->buffer->vk.size <
+             (attribute->offset + attribute->component_size_in_bytes)) {
+            /* Replace with load from robustness buffer when no attribute is in range
+             */
+            addr = PVR_DEV_ADDR_OFFSET(
+               cmd_buffer->device->robustness_buffer->vma->dev_addr,
+               attribute->robustness_buffer_offset);
+         } else {
+            addr = PVR_DEV_ADDR_OFFSET(binding->buffer->dev_addr,
+                                       binding->offset + attribute->offset);
+         }
+
+         PVR_WRITE(qword_buffer,
+                   addr.addr,
+                   attribute->const_offset,
+                   pds_info->data_size_in_dwords);
+
+         entries += sizeof(*attribute);
+         break;
+      }
+
+      case PVR_PDS_CONST_MAP_ENTRY_TYPE_VERTEX_ATTRIBUTE_MAX_INDEX: {
+         const struct pvr_const_map_entry_vertex_attribute_max_index *attribute =
+            (struct pvr_const_map_entry_vertex_attribute_max_index *)entries;
+         const struct pvr_vertex_binding *const binding =
+            &state->vertex_bindings[attribute->binding_index];
+         const uint64_t bound_size = binding->buffer->vk.size - binding->offset;
+         const uint32_t attribute_end =
+            attribute->offset + attribute->component_size_in_bytes;
+         uint32_t max_index;
+
+         if (PVR_HAS_FEATURE(&cmd_buffer->device->pdevice->dev_info,
+                             pds_ddmadt)) {
+            /* TODO: PVR_PDS_CONST_MAP_ENTRY_TYPE_VERTEX_ATTRIBUTE_MAX_INDEX
+             * has the same define value as
+             * PVR_PDS_CONST_MAP_ENTRY_TYPE_VERTEX_ATTR_DDMADT_OOB_BUFFER_SIZE
+             * so maybe we want to remove one of the defines or change the
+             * values.
+             */
+            pvr_finishme("Unimplemented robust buffer access with DDMADT");
+            assert(false);
+         }
+
+         /* If the stride is 0 then all attributes use the same single element
+          * from the binding so the index can only be up to 0.
+          */
+         if (bound_size < attribute_end || attribute->stride == 0) {
+            max_index = 0;
+         } else {
+            max_index = (uint32_t)(bound_size / attribute->stride) - 1;
+
+            /* There's one last attribute that can fit in. */
+            if (bound_size % attribute->stride >= attribute_end)
+               max_index++;
+         }
+
+         PVR_WRITE(dword_buffer,
+                   max_index,
+                   attribute->const_offset,
+                   pds_info->data_size_in_dwords);
+
          break;
       }
 
@@ -2741,7 +3167,7 @@ pvr_setup_vertex_buffers(struct pvr_cmd_buffer *cmd_buffer,
    return VK_SUCCESS;
 }
 
-static VkResult pvr_setup_descriptor_mappings(
+static VkResult pvr_setup_descriptor_mappings_old(
    struct pvr_cmd_buffer *const cmd_buffer,
    enum pvr_stage_allocation stage,
    const struct pvr_stage_allocation_descriptor_state *descriptor_state,
@@ -2823,7 +3249,7 @@ static VkResult pvr_setup_descriptor_mappings(
 
          assert(descriptor->buffer_desc_range ==
                 const_buffer_entry->size_in_dwords * sizeof(uint32_t));
-         assert(descriptor->buffer_create_info_size ==
+         assert(descriptor->buffer_whole_range ==
                 const_buffer_entry->size_in_dwords * sizeof(uint32_t));
 
          buffer_addr =
@@ -2976,6 +3402,526 @@ static VkResult pvr_setup_descriptor_mappings(
       cmd_buffer->device->heaps.pds_heap->base_addr.addr;
 
    return VK_SUCCESS;
+}
+
+/* Note that the descriptor set doesn't have any space for dynamic buffer
+ * descriptors so this works on the assumption that you have a buffer with space
+ * for them at the end.
+ */
+static uint16_t pvr_get_dynamic_descriptor_primary_offset(
+   const struct pvr_device *device,
+   const struct pvr_descriptor_set_layout *layout,
+   const struct pvr_descriptor_set_layout_binding *binding,
+   const uint32_t stage,
+   const uint32_t desc_idx)
+{
+   struct pvr_descriptor_size_info size_info;
+   uint32_t offset;
+
+   assert(binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+          binding->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC);
+   assert(desc_idx < binding->descriptor_count);
+
+   pvr_descriptor_size_info_init(device, binding->type, &size_info);
+
+   offset = layout->total_size_in_dwords;
+   offset += binding->per_stage_offset_in_dwords[stage].primary;
+   offset += (desc_idx * size_info.primary);
+
+   /* Offset must be less than * 16bits. */
+   assert(offset < UINT16_MAX);
+
+   return (uint16_t)offset;
+}
+
+/* Note that the descriptor set doesn't have any space for dynamic buffer
+ * descriptors so this works on the assumption that you have a buffer with space
+ * for them at the end.
+ */
+static uint16_t pvr_get_dynamic_descriptor_secondary_offset(
+   const struct pvr_device *device,
+   const struct pvr_descriptor_set_layout *layout,
+   const struct pvr_descriptor_set_layout_binding *binding,
+   const uint32_t stage,
+   const uint32_t desc_idx)
+{
+   struct pvr_descriptor_size_info size_info;
+   uint32_t offset;
+
+   assert(binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+          binding->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC);
+   assert(desc_idx < binding->descriptor_count);
+
+   pvr_descriptor_size_info_init(device, binding->type, &size_info);
+
+   offset = layout->total_size_in_dwords;
+   offset +=
+      layout->memory_layout_in_dwords_per_stage[stage].primary_dynamic_size;
+   offset += binding->per_stage_offset_in_dwords[stage].secondary;
+   offset += (desc_idx * size_info.secondary);
+
+   /* Offset must be less than * 16bits. */
+   assert(offset < UINT16_MAX);
+
+   return (uint16_t)offset;
+}
+
+/**
+ * \brief Upload a copy of the descriptor set with dynamic buffer offsets
+ * applied.
+ */
+/* TODO: We should probably make the compiler aware of the dynamic descriptors.
+ * We could use push constants like Anv seems to do. This would avoid having to
+ * duplicate all sets containing dynamic descriptors each time the offsets are
+ * updated.
+ */
+static VkResult pvr_cmd_buffer_upload_patched_desc_set(
+   struct pvr_cmd_buffer *cmd_buffer,
+   const struct pvr_descriptor_set *desc_set,
+   const uint32_t *dynamic_offsets,
+   struct pvr_bo **const bo_out)
+{
+   const struct pvr_descriptor_set_layout *layout = desc_set->layout;
+   const uint64_t normal_desc_set_size =
+      layout->total_size_in_dwords * sizeof(uint32_t);
+   const uint64_t dynamic_descs_size =
+      layout->total_dynamic_size_in_dwords * sizeof(uint32_t);
+   struct pvr_descriptor_size_info dynamic_uniform_buffer_size_info;
+   struct pvr_descriptor_size_info dynamic_storage_buffer_size_info;
+   struct pvr_device *device = cmd_buffer->device;
+   struct pvr_bo *patched_desc_set_bo;
+   uint32_t *mem_ptr;
+   VkResult result;
+
+   assert(desc_set->layout->dynamic_buffer_count > 0);
+
+   pvr_descriptor_size_info_init(device,
+                                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                                 &dynamic_uniform_buffer_size_info);
+   pvr_descriptor_size_info_init(device,
+                                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
+                                 &dynamic_storage_buffer_size_info);
+
+   /* TODO: In the descriptor set we don't account for dynamic buffer
+    * descriptors and take care of them in the pipeline layout. The pipeline
+    * layout allocates them at the beginning but let's put them at the end just
+    * because it makes things a bit easier. Ideally we should be using the
+    * pipeline layout and use the offsets from the pipeline layout to patch
+    * descriptors.
+    */
+   result = pvr_cmd_buffer_alloc_mem(cmd_buffer,
+                                     cmd_buffer->device->heaps.general_heap,
+                                     normal_desc_set_size + dynamic_descs_size,
+                                     PVR_BO_ALLOC_FLAG_CPU_MAPPED,
+                                     &patched_desc_set_bo);
+   if (result != VK_SUCCESS)
+      return result;
+
+   mem_ptr = (uint32_t *)patched_desc_set_bo->bo->map;
+
+   memcpy(mem_ptr, desc_set->pvr_bo->bo->map, normal_desc_set_size);
+
+   for (uint32_t i = 0; i < desc_set->layout->binding_count; i++) {
+      const struct pvr_descriptor_set_layout_binding *binding =
+         &desc_set->layout->bindings[i];
+      const struct pvr_descriptor *descriptors =
+         &desc_set->descriptors[binding->descriptor_index];
+      const struct pvr_descriptor_size_info *size_info;
+
+      if (binding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
+         size_info = &dynamic_uniform_buffer_size_info;
+      else if (binding->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC)
+         size_info = &dynamic_storage_buffer_size_info;
+      else
+         continue;
+
+      for (uint32_t stage = 0; stage < PVR_STAGE_ALLOCATION_COUNT; stage++) {
+         uint32_t primary_offset;
+         uint32_t secondary_offset;
+
+         if (!(binding->shader_stage_mask & BITFIELD_BIT(stage)))
+            continue;
+
+         /* Get the offsets for the first dynamic descriptor in the current
+          * binding.
+          */
+         primary_offset =
+            pvr_get_dynamic_descriptor_primary_offset(device,
+                                                      desc_set->layout,
+                                                      binding,
+                                                      stage,
+                                                      0);
+         secondary_offset =
+            pvr_get_dynamic_descriptor_secondary_offset(device,
+                                                        desc_set->layout,
+                                                        binding,
+                                                        stage,
+                                                        0);
+
+         /* clang-format off */
+         for (uint32_t desc_idx = 0;
+              desc_idx < binding->descriptor_count;
+              desc_idx++) {
+            /* clang-format on */
+            const pvr_dev_addr_t addr =
+               PVR_DEV_ADDR_OFFSET(descriptors[desc_idx].buffer_dev_addr,
+                                   dynamic_offsets[desc_idx]);
+            const VkDeviceSize range =
+               MIN2(descriptors[desc_idx].buffer_desc_range,
+                    descriptors[desc_idx].buffer_whole_range -
+                       dynamic_offsets[desc_idx]);
+
+#if defined(DEBUG)
+            uint32_t desc_primary_offset;
+            uint32_t desc_secondary_offset;
+
+            desc_primary_offset =
+               pvr_get_dynamic_descriptor_primary_offset(device,
+                                                         desc_set->layout,
+                                                         binding,
+                                                         stage,
+                                                         desc_idx);
+            desc_secondary_offset =
+               pvr_get_dynamic_descriptor_secondary_offset(device,
+                                                           desc_set->layout,
+                                                           binding,
+                                                           stage,
+                                                           desc_idx);
+
+            /* Check the assumption that the descriptors within a binding, for
+             * a particular stage, are allocated consecutively.
+             */
+            assert(desc_primary_offset ==
+                   primary_offset + size_info->primary * desc_idx);
+            assert(desc_secondary_offset ==
+                   secondary_offset + size_info->secondary * desc_idx);
+#endif
+
+            assert(descriptors[desc_idx].type == binding->type);
+
+            memcpy(mem_ptr + primary_offset + size_info->primary * desc_idx,
+                   &addr.addr,
+                   size_info->primary * sizeof(uint32_t));
+            memcpy(mem_ptr + secondary_offset + size_info->secondary * desc_idx,
+                   &range,
+                   size_info->secondary * sizeof(uint32_t));
+         }
+      }
+   }
+
+   pvr_bo_cpu_unmap(device, patched_desc_set_bo);
+
+   *bo_out = patched_desc_set_bo;
+
+   return VK_SUCCESS;
+}
+
+#define PVR_SELECT(_geom, _frag, _compute)         \
+   (stage == PVR_STAGE_ALLOCATION_VERTEX_GEOMETRY) \
+      ? (_geom)                                    \
+      : (stage == PVR_STAGE_ALLOCATION_FRAGMENT) ? (_frag) : (_compute)
+
+static VkResult
+pvr_cmd_buffer_upload_desc_set_table(struct pvr_cmd_buffer *const cmd_buffer,
+                                     enum pvr_stage_allocation stage,
+                                     pvr_dev_addr_t *addr_out)
+{
+   uint64_t bound_desc_sets[PVR_MAX_DESCRIPTOR_SETS];
+   const struct pvr_descriptor_state *desc_state;
+   uint32_t dynamic_offset_idx = 0;
+   struct pvr_bo *bo;
+   VkResult result;
+
+   switch (stage) {
+   case PVR_STAGE_ALLOCATION_VERTEX_GEOMETRY:
+   case PVR_STAGE_ALLOCATION_FRAGMENT:
+   case PVR_STAGE_ALLOCATION_COMPUTE:
+      break;
+
+   default:
+      unreachable("Unsupported stage.");
+      break;
+   }
+
+   desc_state = PVR_SELECT(&cmd_buffer->state.gfx_desc_state,
+                           &cmd_buffer->state.gfx_desc_state,
+                           &cmd_buffer->state.compute_desc_state);
+
+   for (uint32_t set = 0; set < ARRAY_SIZE(bound_desc_sets); set++)
+      bound_desc_sets[set] = ~0;
+
+   assert(util_last_bit(desc_state->valid_mask) < ARRAY_SIZE(bound_desc_sets));
+   for (uint32_t set = 0; set < util_last_bit(desc_state->valid_mask); set++) {
+      const struct pvr_descriptor_set *desc_set;
+
+      if (!(desc_state->valid_mask & BITFIELD_BIT(set))) {
+         const struct pvr_pipeline_layout *pipeline_layout =
+            PVR_SELECT(cmd_buffer->state.gfx_pipeline->base.layout,
+                       cmd_buffer->state.gfx_pipeline->base.layout,
+                       cmd_buffer->state.compute_pipeline->base.layout);
+         const struct pvr_descriptor_set_layout *set_layout;
+
+         assert(set <= pipeline_layout->set_count);
+
+         set_layout = pipeline_layout->set_layout[set];
+         dynamic_offset_idx += set_layout->dynamic_buffer_count;
+
+         continue;
+      }
+
+      desc_set = desc_state->descriptor_sets[set];
+
+      if (desc_set->layout->dynamic_buffer_count > 0) {
+         struct pvr_bo *new_desc_set_bo;
+
+         assert(dynamic_offset_idx + desc_set->layout->dynamic_buffer_count <=
+                ARRAY_SIZE(desc_state->dynamic_offsets));
+
+         result = pvr_cmd_buffer_upload_patched_desc_set(
+            cmd_buffer,
+            desc_set,
+            &desc_state->dynamic_offsets[dynamic_offset_idx],
+            &new_desc_set_bo);
+         if (result != VK_SUCCESS)
+            return result;
+
+         dynamic_offset_idx += desc_set->layout->dynamic_buffer_count;
+
+         bound_desc_sets[set] = new_desc_set_bo->vma->dev_addr.addr;
+      } else {
+         bound_desc_sets[set] = desc_set->pvr_bo->vma->dev_addr.addr;
+      }
+   }
+
+   result = pvr_cmd_buffer_upload_general(cmd_buffer,
+                                          bound_desc_sets,
+                                          sizeof(bound_desc_sets),
+                                          &bo);
+   if (result != VK_SUCCESS)
+      return result;
+
+   *addr_out = bo->vma->dev_addr;
+   return VK_SUCCESS;
+}
+
+static VkResult
+pvr_process_addr_literal(struct pvr_cmd_buffer *cmd_buffer,
+                         enum pvr_pds_addr_literal_type addr_literal_type,
+                         enum pvr_stage_allocation stage,
+                         pvr_dev_addr_t *addr_out)
+{
+   VkResult result;
+
+   switch (addr_literal_type) {
+   case PVR_PDS_ADDR_LITERAL_DESC_SET_ADDRS_TABLE: {
+      /* TODO: Maybe we want to free pvr_bo? And only when the data
+       * section is written successfully we link all bos to the command
+       * buffer.
+       */
+      result =
+         pvr_cmd_buffer_upload_desc_set_table(cmd_buffer, stage, addr_out);
+      if (result != VK_SUCCESS)
+         return result;
+
+      break;
+   }
+
+   case PVR_PDS_ADDR_LITERAL_PUSH_CONSTS: {
+      const struct pvr_pipeline_layout *layout =
+         PVR_SELECT(cmd_buffer->state.gfx_pipeline->base.layout,
+                    cmd_buffer->state.gfx_pipeline->base.layout,
+                    cmd_buffer->state.compute_pipeline->base.layout);
+      const uint32_t push_constants_offset =
+         PVR_SELECT(layout->vert_push_constants_offset,
+                    layout->frag_push_constants_offset,
+                    layout->compute_push_constants_offset);
+
+      *addr_out = PVR_DEV_ADDR_OFFSET(cmd_buffer->state.push_constants.dev_addr,
+                                      push_constants_offset);
+      break;
+   }
+
+   case PVR_PDS_ADDR_LITERAL_BLEND_CONSTANTS: {
+      float *blend_consts =
+         cmd_buffer->vk.dynamic_graphics_state.cb.blend_constants;
+      size_t size =
+         sizeof(cmd_buffer->vk.dynamic_graphics_state.cb.blend_constants);
+      struct pvr_bo *blend_consts_bo;
+
+      result = pvr_cmd_buffer_upload_general(cmd_buffer,
+                                             blend_consts,
+                                             size,
+                                             &blend_consts_bo);
+      if (result != VK_SUCCESS)
+         return result;
+
+      *addr_out = blend_consts_bo->vma->dev_addr;
+
+      break;
+   }
+
+   default:
+      unreachable("Invalid add literal type.");
+   }
+
+   return VK_SUCCESS;
+}
+
+#undef PVR_SELECT
+
+static VkResult pvr_setup_descriptor_mappings_new(
+   struct pvr_cmd_buffer *const cmd_buffer,
+   enum pvr_stage_allocation stage,
+   const struct pvr_stage_allocation_descriptor_state *descriptor_state,
+   uint32_t *const descriptor_data_offset_out)
+{
+   const struct pvr_pds_info *const pds_info = &descriptor_state->pds_info;
+   const uint8_t *entries;
+   uint32_t *dword_buffer;
+   uint64_t *qword_buffer;
+   struct pvr_bo *pvr_bo;
+   VkResult result;
+
+   if (!pds_info->data_size_in_dwords)
+      return VK_SUCCESS;
+
+   result = pvr_cmd_buffer_alloc_mem(cmd_buffer,
+                                     cmd_buffer->device->heaps.pds_heap,
+                                     pds_info->data_size_in_dwords << 2,
+                                     PVR_BO_ALLOC_FLAG_CPU_MAPPED,
+                                     &pvr_bo);
+   if (result != VK_SUCCESS)
+      return result;
+
+   dword_buffer = (uint32_t *)pvr_bo->bo->map;
+   qword_buffer = (uint64_t *)pvr_bo->bo->map;
+
+   entries = (uint8_t *)pds_info->entries;
+
+   switch (stage) {
+   case PVR_STAGE_ALLOCATION_VERTEX_GEOMETRY:
+   case PVR_STAGE_ALLOCATION_FRAGMENT:
+   case PVR_STAGE_ALLOCATION_COMPUTE:
+      break;
+
+   default:
+      unreachable("Unsupported stage.");
+      break;
+   }
+
+   for (uint32_t i = 0; i < pds_info->entry_count; i++) {
+      const struct pvr_const_map_entry *const entry_header =
+         (struct pvr_const_map_entry *)entries;
+
+      switch (entry_header->type) {
+      case PVR_PDS_CONST_MAP_ENTRY_TYPE_LITERAL32: {
+         const struct pvr_const_map_entry_literal32 *const literal =
+            (struct pvr_const_map_entry_literal32 *)entries;
+
+         PVR_WRITE(dword_buffer,
+                   literal->literal_value,
+                   literal->const_offset,
+                   pds_info->data_size_in_dwords);
+
+         entries += sizeof(*literal);
+         break;
+      }
+
+      case PVR_PDS_CONST_MAP_ENTRY_TYPE_ADDR_LITERAL_BUFFER: {
+         const struct pvr_pds_const_map_entry_addr_literal_buffer
+            *const addr_literal_buffer_entry =
+               (struct pvr_pds_const_map_entry_addr_literal_buffer *)entries;
+         struct pvr_device *device = cmd_buffer->device;
+         struct pvr_bo *addr_literal_buffer_bo;
+         uint32_t addr_literal_count = 0;
+         uint64_t *addr_literal_buffer;
+
+         result = pvr_cmd_buffer_alloc_mem(cmd_buffer,
+                                           device->heaps.general_heap,
+                                           addr_literal_buffer_entry->size,
+                                           PVR_BO_ALLOC_FLAG_CPU_MAPPED,
+                                           &addr_literal_buffer_bo);
+         if (result != VK_SUCCESS)
+            return result;
+
+         addr_literal_buffer = (uint64_t *)addr_literal_buffer_bo->bo->map;
+
+         entries += sizeof(*addr_literal_buffer_entry);
+
+         PVR_WRITE(qword_buffer,
+                   addr_literal_buffer_bo->vma->dev_addr.addr,
+                   addr_literal_buffer_entry->const_offset,
+                   pds_info->data_size_in_dwords);
+
+         for (uint32_t j = i + 1; j < pds_info->entry_count; j++) {
+            const struct pvr_const_map_entry *const entry_header =
+               (struct pvr_const_map_entry *)entries;
+            const struct pvr_pds_const_map_entry_addr_literal *addr_literal;
+            pvr_dev_addr_t dev_addr;
+
+            if (entry_header->type != PVR_PDS_CONST_MAP_ENTRY_TYPE_ADDR_LITERAL)
+               break;
+
+            addr_literal =
+               (struct pvr_pds_const_map_entry_addr_literal *)entries;
+
+            result = pvr_process_addr_literal(cmd_buffer,
+                                              addr_literal->addr_type,
+                                              stage,
+                                              &dev_addr);
+            if (result != VK_SUCCESS)
+               return result;
+
+            addr_literal_buffer[addr_literal_count++] = dev_addr.addr;
+
+            entries += sizeof(*addr_literal);
+         }
+
+         assert(addr_literal_count * sizeof(uint64_t) ==
+                addr_literal_buffer_entry->size);
+
+         i += addr_literal_count;
+
+         pvr_bo_cpu_unmap(device, addr_literal_buffer_bo);
+         break;
+      }
+
+      default:
+         unreachable("Unsupported map entry type.");
+      }
+   }
+
+   pvr_bo_cpu_unmap(cmd_buffer->device, pvr_bo);
+
+   *descriptor_data_offset_out =
+      pvr_bo->vma->dev_addr.addr -
+      cmd_buffer->device->heaps.pds_heap->base_addr.addr;
+
+   return VK_SUCCESS;
+}
+
+static VkResult pvr_setup_descriptor_mappings(
+   struct pvr_cmd_buffer *const cmd_buffer,
+   enum pvr_stage_allocation stage,
+   const struct pvr_stage_allocation_descriptor_state *descriptor_state,
+   const pvr_dev_addr_t *const num_worgroups_buff_addr,
+   uint32_t *const descriptor_data_offset_out)
+{
+   const bool old_path =
+      pvr_has_hard_coded_shaders(&cmd_buffer->device->pdevice->dev_info);
+
+   if (old_path) {
+      return pvr_setup_descriptor_mappings_old(cmd_buffer,
+                                               stage,
+                                               descriptor_state,
+                                               num_worgroups_buff_addr,
+                                               descriptor_data_offset_out);
+   }
+
+   return pvr_setup_descriptor_mappings_new(cmd_buffer,
+                                            stage,
+                                            descriptor_state,
+                                            descriptor_data_offset_out);
 }
 
 static void pvr_compute_update_shared(struct pvr_cmd_buffer *cmd_buffer,
@@ -3287,6 +4233,49 @@ static void pvr_compute_update_kernel(
    pvr_compute_generate_control_stream(csb, sub_cmd, &info);
 }
 
+static VkResult pvr_cmd_upload_push_consts(struct pvr_cmd_buffer *cmd_buffer)
+{
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   struct pvr_bo *bo;
+   VkResult result;
+
+   /* TODO: Here are some possible optimizations/things to consider:
+    *
+    *    - Currently we upload maxPushConstantsSize. The application might only
+    *      be using a portion of that so we might end up with unused memory.
+    *      Should we be smarter about this. If we intend to upload the push
+    *      consts into shareds, we definitely want to do avoid reserving unused
+    *      regs.
+    *
+    *    - For now we have to upload to a new buffer each time since the shaders
+    *      access the push constants from memory. If we were to reuse the same
+    *      buffer we might update the contents out of sync with job submission
+    *      and the shaders will see the updated contents while the command
+    *      buffer was still being recorded and not yet submitted.
+    *      If we were to upload the push constants directly to shared regs we
+    *      could reuse the same buffer (avoiding extra allocation overhead)
+    *      since the contents will be DMAed only on job submission when the
+    *      control stream is processed and the PDS program is executed. This
+    *      approach would also allow us to avoid regenerating the PDS data
+    *      section in some cases since the buffer address will be constants.
+    */
+
+   if (cmd_buffer->state.push_constants.uploaded)
+      return VK_SUCCESS;
+
+   result = pvr_cmd_buffer_upload_general(cmd_buffer,
+                                          state->push_constants.data,
+                                          sizeof(state->push_constants.data),
+                                          &bo);
+   if (result != VK_SUCCESS)
+      return result;
+
+   cmd_buffer->state.push_constants.dev_addr = bo->vma->dev_addr;
+   cmd_buffer->state.push_constants.uploaded = true;
+
+   return VK_SUCCESS;
+}
+
 static void pvr_cmd_dispatch(
    struct pvr_cmd_buffer *const cmd_buffer,
    const pvr_dev_addr_t indirect_addr,
@@ -3295,8 +4284,6 @@ static void pvr_cmd_dispatch(
    struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
    const struct pvr_compute_pipeline *compute_pipeline =
       state->compute_pipeline;
-   const VkShaderStageFlags push_consts_stage_mask =
-      compute_pipeline->base.layout->push_constants_shader_stages;
    struct pvr_sub_cmd_compute *sub_cmd;
    VkResult result;
 
@@ -3306,11 +4293,15 @@ static void pvr_cmd_dispatch(
    sub_cmd->uses_atomic_ops |= compute_pipeline->shader_state.uses_atomic_ops;
    sub_cmd->uses_barrier |= compute_pipeline->shader_state.uses_barrier;
 
-   if (push_consts_stage_mask & VK_SHADER_STAGE_COMPUTE_BIT) {
-      /* TODO: Add a dirty push constants mask in the cmd_buffer state and
-       * check for dirty compute stage.
-       */
-      pvr_finishme("Add support for push constants.");
+   if (state->push_constants.dirty_stages & VK_SHADER_STAGE_COMPUTE_BIT) {
+      result = pvr_cmd_upload_push_consts(cmd_buffer);
+      if (result != VK_SUCCESS)
+         return;
+
+      /* Regenerate the PDS program to use the new push consts buffer. */
+      state->dirty.compute_desc_dirty = true;
+
+      state->push_constants.dirty_stages &= ~VK_SHADER_STAGE_COMPUTE_BIT;
    }
 
    if (compute_pipeline->shader_state.uses_num_workgroups) {
@@ -3529,11 +4520,11 @@ pvr_setup_isp_faces_and_control(struct pvr_cmd_buffer *const cmd_buffer,
 
    const bool rasterizer_discard = dynamic_state->rs.rasterizer_discard_enable;
    const uint32_t subpass_idx = pass_info->subpass_idx;
-   const uint32_t *depth_stencil_attachment_idx =
+   const uint32_t depth_stencil_attachment_idx =
       pass_info->pass->subpasses[subpass_idx].depth_stencil_attachment;
    const struct pvr_image_view *const attachment =
-      depth_stencil_attachment_idx
-         ? pass_info->attachments[*depth_stencil_attachment_idx]
+      depth_stencil_attachment_idx != VK_ATTACHMENT_UNUSED
+         ? pass_info->attachments[depth_stencil_attachment_idx]
          : NULL;
 
    const enum PVRX(TA_OBJTYPE)
@@ -4578,6 +5569,11 @@ pvr_ppp_state_update_required(const struct pvr_cmd_buffer *cmd_buffer)
    const struct pvr_cmd_buffer_state *const state = &cmd_buffer->state;
    const struct PVRX(TA_STATE_HEADER) *const header = &state->emit_header;
 
+   /* For push constants we only need to worry if they are updated for the
+    * fragment stage since we're only updating the pds programs used in the
+    * fragment stage.
+    */
+
    return header->pres_ppp_ctrl || header->pres_ispctl ||
           header->pres_ispctl_fb || header->pres_ispctl_ba ||
           header->pres_ispctl_bb || header->pres_ispctl_dbsc ||
@@ -4589,6 +5585,7 @@ pvr_ppp_state_update_required(const struct pvr_cmd_buffer *cmd_buffer)
           header->pres_varying_word2 || header->pres_stream_out_program ||
           state->dirty.fragment_descriptors ||
           state->dirty.gfx_pipeline_binding || state->dirty.isp_userpass ||
+          state->push_constants.dirty_stages & VK_SHADER_STAGE_FRAGMENT_BIT ||
           BITSET_TEST(dynamic_dirty, MESA_VK_DYNAMIC_DS_STENCIL_COMPARE_MASK) ||
           BITSET_TEST(dynamic_dirty, MESA_VK_DYNAMIC_DS_STENCIL_WRITE_MASK) ||
           BITSET_TEST(dynamic_dirty, MESA_VK_DYNAMIC_DS_STENCIL_REFERENCE) ||
@@ -4839,7 +5836,7 @@ static void pvr_emit_dirty_vdm_state(struct pvr_cmd_buffer *const cmd_buffer,
             break;
 
          default:
-            unreachable(!"Invalid index type");
+            unreachable("Invalid index type");
          }
       }
    }
@@ -4987,7 +5984,11 @@ static VkResult pvr_validate_draw_state(struct pvr_cmd_buffer *cmd_buffer)
       pvr_setup_vertex_buffers(cmd_buffer, gfx_pipeline);
    }
 
-   /* TODO: Check for dirty push constants */
+   if (state->push_constants.dirty_stages & VK_SHADER_STAGE_ALL_GRAPHICS) {
+      result = pvr_cmd_upload_push_consts(cmd_buffer);
+      if (result != VK_SUCCESS)
+         return result;
+   }
 
    state->dirty.vertex_descriptors = state->dirty.gfx_pipeline_binding;
    state->dirty.fragment_descriptors = state->dirty.vertex_descriptors;
@@ -5003,6 +6004,12 @@ static VkResult pvr_validate_draw_state(struct pvr_cmd_buffer *cmd_buffer)
 
    if (BITSET_TEST(dynamic_state->dirty, MESA_VK_DYNAMIC_CB_BLEND_CONSTANTS))
       state->dirty.fragment_descriptors = true;
+
+   state->dirty.vertex_descriptors |=
+      state->push_constants.dirty_stages &
+      (VK_SHADER_STAGE_ALL_GRAPHICS & ~VK_SHADER_STAGE_FRAGMENT_BIT);
+   state->dirty.fragment_descriptors |= state->push_constants.dirty_stages &
+                                        VK_SHADER_STAGE_FRAGMENT_BIT;
 
    if (state->dirty.fragment_descriptors) {
       result = pvr_setup_descriptor_mappings(
@@ -5048,6 +6055,8 @@ static VkResult pvr_validate_draw_state(struct pvr_cmd_buffer *cmd_buffer)
    state->dirty.isp_userpass = false;
    state->dirty.vertex_bindings = false;
    state->dirty.vis_test = false;
+
+   state->push_constants.dirty_stages &= ~VK_SHADER_STAGE_ALL_GRAPHICS;
 
    return VK_SUCCESS;
 }
@@ -5933,8 +6942,10 @@ pvr_execute_graphics_cmd_buffer(struct pvr_cmd_buffer *cmd_buffer,
          primary_sub_cmd->gfx.empty_cmd = false;
       }
 
-      if (!PVR_HAS_FEATURE(dev_info, gs_rta_support))
-         pvr_finishme("Unimplemented path.");
+      if (!PVR_HAS_FEATURE(dev_info, gs_rta_support)) {
+         util_dynarray_append_dynarray(&cmd_buffer->deferred_clears,
+                                       &sec_cmd_buffer->deferred_clears);
+      }
    }
 
    return VK_SUCCESS;
@@ -6022,7 +7033,7 @@ static void pvr_insert_transparent_obj(struct pvr_cmd_buffer *const cmd_buffer,
     * in parallel so writing the template in place could cause problems.
     */
    struct pvr_static_clear_ppp_template clear =
-      device->static_clear_state.ppp_templates[PVR_STATIC_CLEAR_COLOR_BIT];
+      device->static_clear_state.ppp_templates[VK_IMAGE_ASPECT_COLOR_BIT];
    uint32_t pds_state[PVR_STATIC_CLEAR_PDS_STATE_COUNT] = { 0 };
    struct pvr_csb *csb = &sub_cmd->control_stream;
    struct pvr_bo *ppp_bo;
@@ -6179,12 +7190,15 @@ pvr_stencil_has_self_dependency(const struct pvr_cmd_buffer_state *const state)
       pvr_get_current_subpass(state);
    const uint32_t *const input_attachments = current_subpass->input_attachments;
 
+   if (current_subpass->depth_stencil_attachment == VK_ATTACHMENT_UNUSED)
+      return false;
+
    /* We only need to check the current software subpass as we don't support
     * merging to/from a subpass with self-dep stencil.
     */
 
    for (uint32_t i = 0; i < current_subpass->input_count; i++) {
-      if (input_attachments[i] == *current_subpass->depth_stencil_attachment)
+      if (input_attachments[i] == current_subpass->depth_stencil_attachment)
          return true;
    }
 

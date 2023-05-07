@@ -88,11 +88,26 @@ static void copy_propagate_scan_read(void * data, struct rc_instruction * inst,
 		return;
 	}
 
+	/* R300/R400 is unhappy about propagating
+	 *  0: MOV temp[1], -none.1111;
+	 *  1: KIL temp[1];
+	 * to
+	 *  0: KIL -none.1111;
+	 *
+	 * R500 is fine with it.
+	 */
+	if (!reader_data->C->is_r500 && inst->U.I.Opcode == RC_OPCODE_KIL &&
+		reader_data->Writer->U.I.SrcReg[0].File == RC_FILE_NONE) {
+		reader_data->Abort = 1;
+		return;
+	}
+
 	/* These instructions cannot read from the constants file.
 	 * see radeonTransformTEX()
 	 */
 	if(reader_data->Writer->U.I.SrcReg[0].File != RC_FILE_TEMPORARY &&
 			reader_data->Writer->U.I.SrcReg[0].File != RC_FILE_INPUT &&
+			reader_data->Writer->U.I.SrcReg[0].File != RC_FILE_NONE &&
 				(inst->U.I.Opcode == RC_OPCODE_TEX ||
 				inst->U.I.Opcode == RC_OPCODE_TXB ||
 				inst->U.I.Opcode == RC_OPCODE_TXP ||
@@ -283,6 +298,7 @@ static void constant_folding_mul(struct rc_instruction * inst)
 		} else if (swz == RC_SWIZZLE_ZERO) {
 			inst->U.I.Opcode = RC_OPCODE_MOV;
 			inst->U.I.SrcReg[0].Swizzle = RC_SWIZZLE_0000;
+			inst->U.I.SrcReg[0].File = RC_FILE_NONE;
 			return;
 		}
 	}
@@ -296,6 +312,7 @@ static void constant_folding_mul(struct rc_instruction * inst)
 		} else if (swz == RC_SWIZZLE_ZERO) {
 			inst->U.I.Opcode = RC_OPCODE_MOV;
 			inst->U.I.SrcReg[0].Swizzle = RC_SWIZZLE_0000;
+			inst->U.I.SrcReg[0].File = RC_FILE_NONE;
 			return;
 		}
 	}
@@ -641,7 +658,7 @@ static void presub_replace_inv(
 /**
  * PRESUB_INV: ADD TEMP[0], none.1, -TEMP[1]
  * Use the presubtract 1 - src0 for all readers of TEMP[0].  The first source
- * of the add instruction must have the constatnt 1 swizzle.  This function
+ * of the add instruction must have the constant 1 swizzle.  This function
  * does not check const registers to see if their value is 1.0, so it should
  * be called after the constant_folding optimization.
  * @return

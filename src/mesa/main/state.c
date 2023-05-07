@@ -94,7 +94,7 @@ _mesa_update_allow_draw_out_of_order(struct gl_context *ctx)
    if (!ctx->Const.AllowDrawOutOfOrder)
       return;
 
-   assert(ctx->API == API_OPENGL_COMPAT);
+   assert(_mesa_is_desktop_gl_compat(ctx));
 
    /* If all of these are NULL, GLSL is disabled. */
    struct gl_program *vs =
@@ -382,11 +382,11 @@ update_program(struct gl_context *ctx)
    if (st->lower_point_size && last_vertex_stage_dirty &&
        !ctx->VertexProgram.PointSizeEnabled && !ctx->PointSizeIsSet) {
       if (ctx->GeometryProgram._Current) {
-         st->dirty |= ST_NEW_GS_CONSTANTS;
+         ctx->NewDriverState |= ST_NEW_GS_CONSTANTS;
       } else if (ctx->TessEvalProgram._Current) {
-         st->dirty |= ST_NEW_TES_CONSTANTS;
+         ctx->NewDriverState |= ST_NEW_TES_CONSTANTS;
       } else {
-         st->dirty |= ST_NEW_VS_CONSTANTS;
+         ctx->NewDriverState |= ST_NEW_VS_CONSTANTS;
       }
    }
 
@@ -397,6 +397,11 @@ update_program(struct gl_context *ctx)
        tcp_changed || cp_changed) {
       /* This will mask out unused shader resources. */
       st->active_states = _mesa_get_active_states(ctx);
+
+      /* Some drivers need to clean up previous states too */
+      if (st->validate_all_dirty_states)
+         st->active_states |= dirty;
+
       return _NEW_PROGRAM;
    }
 
@@ -435,7 +440,7 @@ update_program_constants(struct gl_context *ctx)
       update_single_program_constants(ctx, ctx->FragmentProgram._Current,
                                       MESA_SHADER_FRAGMENT);
 
-   if (ctx->API == API_OPENGL_COMPAT &&
+   if (_mesa_is_desktop_gl_compat(ctx) &&
        ctx->Const.GLSLVersionCompat >= 150) {
       new_state |=
          update_single_program_constants(ctx, ctx->GeometryProgram._Current,
@@ -505,8 +510,8 @@ _mesa_update_state_locked( struct gl_context *ctx )
       _mesa_update_framebuffer(ctx, ctx->ReadBuffer, ctx->DrawBuffer);
 
    /* Handle Core and Compatibility contexts separately. */
-   if (ctx->API == API_OPENGL_COMPAT ||
-       ctx->API == API_OPENGLES) {
+   if (_mesa_is_desktop_gl_compat(ctx) ||
+       _mesa_is_gles1(ctx)) {
       /* Update derived state. */
       if (new_state & (_NEW_MODELVIEW|_NEW_PROJECTION))
          _mesa_update_modelview_project( ctx, new_state );
@@ -675,7 +680,7 @@ set_vertex_processing_mode(struct gl_context *ctx, gl_vertex_processing_mode m)
        * ES 2.0+ or OpenGL core profile, none of these arrays should ever
        * be enabled.
        */
-      if (ctx->API == API_OPENGL_COMPAT)
+      if (_mesa_is_desktop_gl_compat(ctx))
          ctx->VertexProgram._VPModeInputFilter = VERT_BIT_ALL;
       else
          ctx->VertexProgram._VPModeInputFilter = VERT_BIT_GENERIC_ALL;
@@ -685,11 +690,8 @@ set_vertex_processing_mode(struct gl_context *ctx, gl_vertex_processing_mode m)
       assert(0);
    }
 
-   /* Since we only track the varying inputs while being in fixed function
-    * vertex processing mode, we may need to update fixed-func shaders
-    * for zero-stride vertex attribs.
-    */
-   _mesa_set_varying_vp_inputs(ctx, ctx->Array._DrawVAOEnabledAttribs);
+   _mesa_set_varying_vp_inputs(ctx, ctx->VertexProgram._VPModeInputFilter &
+                               ctx->Array._DrawVAO->_EnabledWithMapMode);
 }
 
 

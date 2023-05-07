@@ -75,15 +75,13 @@ struct fixed_position {
  * Alloc space for a new triangle plus the input.a0/dadx/dady arrays
  * immediately after it.
  * The memory is allocated from the per-scene pool, not per-tile.
- * \param tri_size  returns number of bytes allocated
  * \param num_inputs  number of fragment shader inputs
  * \return pointer to triangle space
  */
 struct lp_rast_triangle *
 lp_setup_alloc_triangle(struct lp_scene *scene,
                         unsigned nr_inputs,
-                        unsigned nr_planes,
-                        unsigned *tri_size)
+                        unsigned nr_planes)
 {
    // add 1 for XYZW position
    unsigned input_array_sz = (nr_inputs + 1) * sizeof(float[4]);
@@ -91,11 +89,11 @@ lp_setup_alloc_triangle(struct lp_scene *scene,
 
    STATIC_ASSERT(sizeof(struct lp_rast_plane) % 8 == 0);
 
-   *tri_size = (sizeof(struct lp_rast_triangle) +
-                3 * input_array_sz +   // 3 = da + dadx + dady
-                plane_sz);
+   const unsigned tri_size  = sizeof(struct lp_rast_triangle)
+      + 3 * input_array_sz +   // 3 = da + dadx + dady
+      + plane_sz;
 
-   struct lp_rast_triangle *tri = lp_scene_alloc_aligned(scene, *tri_size, 16);
+   struct lp_rast_triangle *tri = lp_scene_alloc_aligned(scene, tri_size, 16);
    if (!tri)
       return NULL;
 
@@ -105,7 +103,7 @@ lp_setup_alloc_triangle(struct lp_scene *scene,
       ASSERTED char *a = (char *)tri;
       ASSERTED char *b = (char *)&GET_PLANES(tri)[nr_planes];
 
-      assert(b - a == *tri_size);
+      assert(b - a == tri_size);
    }
 
    return tri;
@@ -272,9 +270,6 @@ do_triangle_ccw(struct lp_setup_context *setup,
 {
    struct lp_scene *scene = setup->scene;
 
-   if (0)
-      lp_setup_print_triangle(setup, v0, v1, v2);
-
    const float (*pv)[4];
    if (setup->flatshade_first) {
       pv = v0;
@@ -349,10 +344,9 @@ do_triangle_ccw(struct lp_setup_context *setup,
    scissor_planes_needed(s_planes, &bbox, scissor);
    nr_planes += s_planes[0] + s_planes[1] + s_planes[2] + s_planes[3];
 
-   unsigned tri_bytes;
    const struct lp_setup_variant_key *key = &setup->setup.variant->key;
    struct lp_rast_triangle *tri =
-      lp_setup_alloc_triangle(scene, key->num_inputs, nr_planes, &tri_bytes);
+      lp_setup_alloc_triangle(scene, key->num_inputs, nr_planes);
    if (!tri)
       return FALSE;
 
@@ -397,7 +391,8 @@ do_triangle_ccw(struct lp_setup_context *setup,
        setup->pixel_offset == 0.5f &&
        key->num_inputs == 1 &&
        (key->inputs[0].interp == LP_INTERP_LINEAR ||
-        key->inputs[0].interp == LP_INTERP_PERSPECTIVE)) {
+        key->inputs[0].interp == LP_INTERP_PERSPECTIVE) &&
+        setup->fs.current_tex_num == 0) {
       float dist0 = v0[0][0] * v0[0][0] + v0[0][1] * v0[0][1];
       float dist1 = v1[0][0] * v1[0][0] + v1[0][1] * v1[0][1];
       float dist2 = v2[0][0] * v2[0][0] + v2[0][1] * v2[0][1];
@@ -1001,6 +996,15 @@ retry_triangle_ccw(struct lp_setup_context *setup,
                    const float (*v2)[4],
                    boolean front)
 {
+   if (0)
+      lp_setup_print_triangle(setup, v0, v1, v2);
+
+   if (lp_setup_zero_sample_mask(setup)) {
+      if (0) debug_printf("zero sample mask\n");
+      LP_COUNT(nr_culled_tris);
+      return;
+   }
+
    if (!do_triangle_ccw(setup, position, v0, v1, v2, front)) {
       if (!lp_setup_flush_and_restart(setup))
          return;

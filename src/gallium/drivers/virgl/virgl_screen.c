@@ -41,7 +41,6 @@
 #include "virgl_resource.h"
 #include "virgl_public.h"
 #include "virgl_context.h"
-#include "virtio-gpu/virgl_protocol.h"
 #include "virgl_encode.h"
 
 int virgl_debug = 0;
@@ -56,6 +55,7 @@ static const struct debug_named_value virgl_debug_options[] = {
    { "r8srgb-readback",   VIRGL_DEBUG_L8_SRGB_ENABLE_READBACK, "Enable redaback for L8 sRGB textures" },
    { "nocoherent", VIRGL_DEBUG_NO_COHERENT,        "Disable coherent memory"},
    { "video",     VIRGL_DEBUG_VIDEO,               "Video codec"},
+   { "shader_sync", VIRGL_DEBUG_SHADER_SYNC,       "Sync after every shader link"},
    DEBUG_NAMED_VALUE_END
 };
 DEBUG_GET_ONCE_FLAGS_OPTION(virgl_debug, "VIRGL_DEBUG", virgl_debug_options, 0)
@@ -63,7 +63,7 @@ DEBUG_GET_ONCE_FLAGS_OPTION(virgl_debug, "VIRGL_DEBUG", virgl_debug_options, 0)
 static const char *
 virgl_get_vendor(struct pipe_screen *screen)
 {
-   return "Mesa/X.org";
+   return "Mesa";
 }
 
 
@@ -200,9 +200,10 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_NIR_IMAGES_AS_DEREF:
       return 0;
    case PIPE_CAP_QUERY_TIMESTAMP:
-      return 1;
    case PIPE_CAP_QUERY_TIME_ELAPSED:
-      return 1;
+      if (vscreen->caps.caps.v2.host_feature_check_version >= 15)
+         return vscreen->caps.caps.v1.bset.timer_query;
+      return 1; /* older versions had this always enabled */
    case PIPE_CAP_TGSI_TEXCOORD:
       return vscreen->caps.caps.v2.host_feature_check_version >= 10;
    case PIPE_CAP_MIN_MAP_BUFFER_ALIGNMENT:
@@ -229,7 +230,8 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
       return 1;
    case PIPE_CAP_VS_LAYER_VIEWPORT:
-      return 0;
+      return (vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_VS_VERTEX_LAYER) &&
+            (vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_VS_VIEWPORT_INDEX);
    case PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES:
       return vscreen->caps.caps.v2.max_geom_output_vertices;
    case PIPE_CAP_MAX_GEOMETRY_TOTAL_OUTPUT_COMPONENTS:
@@ -365,6 +367,9 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
    }
 }
 
+#define VIRGL_SHADER_STAGE_CAP_V2(CAP, STAGE) \
+   vscreen->caps.caps.v2. CAP[virgl_shader_stage_convert(STAGE)]
+
 static int
 virgl_get_shader_param(struct pipe_screen *screen,
                        enum pipe_shader_type shader,
@@ -430,7 +435,7 @@ virgl_get_shader_param(struct pipe_screen *screen,
       case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
          if (vscreen->caps.caps.v2.host_feature_check_version < 12)
             return 4096 * sizeof(float[4]);
-         return vscreen->caps.caps.v2.max_const_buffer_size[shader];
+         return VIRGL_SHADER_STAGE_CAP_V2(max_const_buffer_size, shader);
       case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
          if (shader == PIPE_SHADER_FRAGMENT || shader == PIPE_SHADER_COMPUTE)
             return vscreen->caps.caps.v2.max_shader_buffer_frag_compute;
@@ -446,9 +451,9 @@ virgl_get_shader_param(struct pipe_screen *screen,
       case PIPE_SHADER_CAP_SUPPORTED_IRS:
          return (1 << PIPE_SHADER_IR_TGSI) | ((virgl_debug & VIRGL_DEBUG_USE_TGSI) ? 0 : (1 << PIPE_SHADER_IR_NIR));
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
-         return vscreen->caps.caps.v2.max_atomic_counters[shader];
+         return VIRGL_SHADER_STAGE_CAP_V2(max_atomic_counters, shader);
       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
-         return vscreen->caps.caps.v2.max_atomic_counter_buffers[shader];
+         return VIRGL_SHADER_STAGE_CAP_V2(max_atomic_counter_buffers, shader);
       case PIPE_SHADER_CAP_INT64_ATOMICS:
       case PIPE_SHADER_CAP_FP16:
       case PIPE_SHADER_CAP_FP16_DERIVATIVES:
@@ -1097,6 +1102,18 @@ virgl_get_compiler_options(struct pipe_screen *pscreen,
    return &vscreen->compiler_options;
 }
 
+static int
+virgl_screen_get_fd(struct pipe_screen *pscreen)
+{
+   struct virgl_screen *vscreen = virgl_screen(pscreen);
+   struct virgl_winsys *vws = vscreen->vws;
+
+   if (vws->get_fd)
+      return vws->get_fd(vws);
+   else
+      return -1;
+}
+
 struct pipe_screen *
 virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *config)
 {
@@ -1106,6 +1123,7 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
    const char *VIRGL_GLES_APPLY_BGRA_DEST_SWIZZLE = "gles_apply_bgra_dest_swizzle";
    const char *VIRGL_GLES_SAMPLES_PASSED_VALUE = "gles_samples_passed_value";
    const char *VIRGL_FORMAT_L8_SRGB_ENABLE_READBACK = "format_l8_srgb_enable_readback";
+   const char *VIRGL_SHADER_SYNC = "virgl_shader_sync";
 
    if (!screen)
       return NULL;
@@ -1124,15 +1142,18 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
             driQueryOptioni(config->options, VIRGL_GLES_SAMPLES_PASSED_VALUE);
       screen->tweak_l8_srgb_readback =
             driQueryOptionb(config->options, VIRGL_FORMAT_L8_SRGB_ENABLE_READBACK);
+      screen->shader_sync = driQueryOptionb(config->options, VIRGL_SHADER_SYNC);
    }
    screen->tweak_gles_emulate_bgra &= !(virgl_debug & VIRGL_DEBUG_NO_EMULATE_BGRA);
    screen->tweak_gles_apply_bgra_dest_swizzle &= !(virgl_debug & VIRGL_DEBUG_NO_BGRA_DEST_SWIZZLE);
    screen->no_coherent = virgl_debug & VIRGL_DEBUG_NO_COHERENT;
    screen->tweak_l8_srgb_readback |= !!(virgl_debug & VIRGL_DEBUG_L8_SRGB_ENABLE_READBACK);
+   screen->shader_sync |= !!(virgl_debug & VIRGL_DEBUG_SHADER_SYNC);
 
    screen->vws = vws;
    screen->base.get_name = virgl_get_name;
    screen->base.get_vendor = virgl_get_vendor;
+   screen->base.get_screen_fd = virgl_screen_get_fd;
    screen->base.get_param = virgl_get_param;
    screen->base.get_shader_param = virgl_get_shader_param;
    screen->base.get_video_param = virgl_get_video_param;
@@ -1178,6 +1199,9 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
    }
    screen->compiler_options.lower_ffma32 = true;
    screen->compiler_options.fuse_ffma32 = false;
+   screen->compiler_options.lower_ldexp = true;
+   screen->compiler_options.lower_image_offset_to_range_base = true;
+   screen->compiler_options.lower_atomic_offset_to_range_base = true;
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct virgl_transfer), 16);
 

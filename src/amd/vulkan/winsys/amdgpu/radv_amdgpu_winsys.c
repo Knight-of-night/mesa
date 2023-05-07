@@ -45,8 +45,11 @@ do_winsys_init(struct radv_amdgpu_winsys *ws, int fd)
    if (!ac_query_gpu_info(fd, ws->dev, &ws->info))
       return false;
 
-   if (ws->info.drm_minor < 23) {
-      fprintf(stderr, "radv/amdgpu: DRM 3.23+ is required (Linux kernel 4.15+)\n");
+   if (!ac_query_pci_bus_info(fd, &ws->info))
+      return false;
+
+   if (ws->info.drm_minor < 27) {
+      fprintf(stderr, "radv/amdgpu: DRM 3.27+ is required (Linux kernel 4.20+)\n");
       return false;
    }
 
@@ -59,7 +62,7 @@ do_winsys_init(struct radv_amdgpu_winsys *ws, int fd)
    ws->info.ip[AMD_IP_SDMA].num_queues = MIN2(ws->info.ip[AMD_IP_SDMA].num_queues, MAX_RINGS_PER_TYPE);
    ws->info.ip[AMD_IP_COMPUTE].num_queues = MIN2(ws->info.ip[AMD_IP_COMPUTE].num_queues, MAX_RINGS_PER_TYPE);
 
-   ws->use_ib_bos = ws->info.gfx_level >= GFX7;
+   ws->use_ib_bos = true;
    return true;
 }
 

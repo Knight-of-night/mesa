@@ -126,7 +126,7 @@ image_binding_grow(const struct anv_device *device,
       &image->bindings[binding].memory_range;
 
    if (has_implicit_offset) {
-      offset = align_u64(container->offset + container->size, alignment);
+      offset = align64(container->offset + container->size, alignment);
    } else {
       /* Offset must be validated because it comes from
        * VkImageDrmFormatModifierExplicitCreateInfoEXT.
@@ -375,6 +375,13 @@ can_fast_clear_with_non_zero_color(const struct intel_device_info *devinfo,
                                    uint32_t plane,
                                    const VkImageFormatListCreateInfo *fmt_list)
 {
+   /* Triangles rendered on non-zero fast cleared images with 8xMSAA can get
+    * black pixels around them on Haswell.
+    */
+   if (devinfo->ver == 7 && image->vk.samples == 8) {
+      return false;
+   }
+
    /* If we don't have an AUX surface where fast clears apply, we can return
     * early.
     */
@@ -441,7 +448,7 @@ anv_get_isl_format_with_usage(const struct intel_device_info *devinfo,
                             vk_tiling);
 
    if ((vk_usage == VK_IMAGE_USAGE_STORAGE_BIT) &&
-       isl_is_storage_image_format(format.isl_format)) {
+       isl_is_storage_image_format(devinfo, format.isl_format)) {
       enum isl_format lowered_format =
          isl_lower_storage_image_format(devinfo, format.isl_format);
 
@@ -1274,6 +1281,10 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
    if (image->vk.external_handle_types &
        VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
       image->from_ahb = true;
+#ifdef ANDROID
+      image->vk.ahardware_buffer_format =
+         anv_ahb_format_for_vk_format(image->vk.format);
+#endif
       return VK_SUCCESS;
    }
 
@@ -1847,8 +1858,8 @@ void anv_GetImageSubresourceLayout(
                                           0 /* logical_z_offset_px */,
                                           &offset_B, NULL, NULL);
       layout->offset += offset_B;
-      layout->size = layout->rowPitch * anv_minify(image->vk.extent.height,
-                                                   subresource->mipLevel) *
+      layout->size = layout->rowPitch * u_minify(image->vk.extent.height,
+                                                 subresource->mipLevel) *
                      image->vk.extent.depth;
    } else {
       layout->size = surface->memory_range.size;
@@ -2512,7 +2523,7 @@ anv_CreateImageView(VkDevice _device,
                                       &iview->planes[vplane].storage_surface_state,
                                       NULL);
 
-         if (isl_is_storage_image_format(format.isl_format)) {
+         if (isl_is_storage_image_format(device->info, format.isl_format)) {
             iview->planes[vplane].lowered_storage_surface_state.state =
                alloc_surface_state(device);
 

@@ -19,10 +19,6 @@
  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
- *
- * Authors:
- *    Jason Ekstrand (jason@jlekstrand.net)
- *
  */
 
 #ifndef _VTN_PRIVATE_H_
@@ -600,6 +596,9 @@ const struct glsl_type *
 vtn_type_get_nir_type(struct vtn_builder *b, struct vtn_type *type,
                       enum vtn_variable_mode mode);
 
+nir_scope
+vtn_scope_to_nir_scope(struct vtn_builder *b, SpvScope scope);
+
 struct vtn_image_pointer {
    nir_deref_instr *image;
    nir_ssa_def *coord;
@@ -739,6 +738,7 @@ struct vtn_builder {
    struct vtn_value *entry_point;
    struct vtn_value *workgroup_size_builtin;
    bool variable_pointers;
+   bool image_gather_bias_lod;
 
    uint32_t *interface_ids;
    size_t interface_ids_count;
